@@ -1,0 +1,10 @@
+{
+  "comment": "Vig-free implied probabilities from live markets, pre-Stage-3 lock (2026-06-10). Sources: GGbet via tips.gg (Vitality-FUT, Falcons-G2, Aurora-Monte), Polymarket traded prices (MOUZ-Legacy $19K vol, MongolZ-BetBoom $32K vol).",
+  "anchors": [
+    {"a": "Vitality", "b": "FUT",     "p": 0.791},
+    {"a": "MOUZ",     "b": "Legacy",  "p": 0.570},
+    {"a": "MongolZ",  "b": "BetBoom", "p": 0.510},
+    {"a": "Falcons",  "b": "G2",      "p": 0.665},
+    {"a": "Aurora",   "b": "Monte",   "p": 0.605}
+  ]
+}

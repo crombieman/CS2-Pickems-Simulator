@@ -1,0 +1,9 @@
+# AI working artifacts — local only
+memory/
+.claude/
+docs/plans/
+MEMORY.md
+tasks/
+
+__pycache__/
+*.pyc
