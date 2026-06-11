@@ -49,29 +49,48 @@ belong in advance slots rather than 3-0 slots.
 
 ## Data provenance (as committed)
 
-- `matches_2026.csv`: 73 verified series — complete Cologne Stage 2,
+- `matches_2026.csv`: 87 verified series — complete Cologne Stage 2,
   complete IEM Rio 2026, plus confirmed results from IEM Atlanta,
-  EPL S23, PGL Astana, CS Asia Championships, BLAST Bounty/Rotterdam/
-  Spring, PGL Bucharest. Sourced from Liquipedia/HLTV/escharts coverage.
-- `market_anchors.json`: pre-lock lines, 2026-06-10. GGbet (de-vigged
-  proportionally) + Polymarket traded mid prices. Polymarket markets with
-  $0 volume were discarded as untraded market-maker ladders.
+  EPL S23, PGL Astana (full Stage-3-team coverage added in v2 refresh),
+  CS Asia Championships, IEM Kraków, BLAST Bounty/Rotterdam/Spring,
+  PGL Bucharest. Sourced from Liquipedia/HLTV/escharts coverage; v2
+  additions cross-verified against 2+ independent pages (two series
+  with contradictory sources were discarded rather than guessed).
+- `market_anchors.json`: refreshed 2026-06-10 evening (v2). All 8 R1
+  matches from Polymarket gamma API exact two-sided mids ($101K-$472K
+  volume per market, 1-cent spreads); GGbet cross-checks agree within
+  ~2pts. Stage 3 format verified via Liquipedia: **all matches BO3**
+  (a first for Majors), so anchors are BO3 series probabilities — the
+  scale ratings are calibrated to. The original 5-anchor set
+  (2026-06-09/10, thinner books) is superseded.
 
-## Final Stage 3 slate (locked 2026-06-10)
+## Final Stage 3 slate (v2 re-lock, 2026-06-10 evening)
 
-- **3-0:** Vitality, Falcons
-- **0-3:** 9z, B8
-- **Advance:** Spirit, NAVI, FURIA, MOUZ, PARIVISION, Aurora
-- Model P(≥5 correct) ≈ 0.39, E[ticks] ≈ 4.1
+- **3-0:** Vitality, Spirit
+- **0-3:** B8, Monte
+- **Advance:** NAVI, Falcons, FURIA, Aurora, MOUZ, G2
+- Model P(≥5 correct) ≈ 0.43, E[ticks] ≈ 4.25
+- Pipeline argmax, stable across sim seeds 7/11/42/123 (including the
+  G2-vs-MongolZ last advance slot: G2 +0.003-0.006 P(≥5) on same sims).
 
-Provenance note: the committed pipeline's argmax swaps Falcons and FURIA
-(FURIA 3-0, Falcons advance) at Δ P(≥5) ≈ +0.002 — inside Monte Carlo
-noise, and the locked slate has the higher E[ticks] (4.13 vs 4.10).
-The lock stands as a manual tie-break toward expected ticks. Per-team
-probabilities as locked: `data/stage3_probs.json` (40k sims, seed 11).
+Per-team probabilities as re-locked: `data/stage3_probs.json` (40k sims,
+seed 11). The superseded v1 table is `data/stage3_probs_locked_v1.json`.
 
-Log these against actuals: per-team Brier score on (p30, padv, p03) is
-the postmortem that matters, not whether the slate passed.
+### v1 slate (original lock, 2026-06-10 afternoon — superseded)
+
+- 3-0: Vitality, Falcons · 0-3: 9z, B8 ·
+  Advance: Spirit, NAVI, FURIA, MOUZ, PARIVISION, Aurora
+- Built on 5 anchors / 73 series; P(≥5) ≈ 0.39 under v1, ≈ 0.37 under v2.
+- The v2 refresh repriced three unanchored R1 matches (Spirit 64.5% over
+  NAVI vs fitted 51%; PARIVISION only 55.5% over 9z; FURIA 73.5% over B8)
+  and filled dataset gaps (e.g. 9z's PGL Astana run). Original provenance
+  note: v1's argmax preferred FURIA 3-0 over Falcons at Δ P(≥5) ≈ +0.002;
+  the v1 lock was a manual tie-break toward E[ticks] (4.13 vs 4.10).
+
+Log these against actuals: per-team Brier on (p30, padv, p03) for both
+v1 and v2 (`src/postmortem.py` grades both) is the postmortem that
+matters — including whether the refresh helped — not whether the slate
+passed.
 
 ## Known limitations
 
@@ -81,8 +100,14 @@ the postmortem that matters, not whether the slate passed.
   modeling, or head-to-head style effects (e.g. donk vs NAVI).
 - Static ratings within the stage; no round-to-round form updating.
 - BO3s drawn as single Bernoulli events rather than map-level sequences.
-- Roster changes (MOUZ's Brollan-for-jL, Major only) are invisible to
-  team-level fitting; only the market layer can price them.
+- Roster changes are invisible to team-level fitting; only the market
+  layer can price them. Known at v2 lock: Brollan's last event with MOUZ,
+  karrigan reportedly starting for Falcons, BetBoom stand-in churn +
+  visa uncertainty (likely why MGLZ-BB sits at a coin flip).
+- Symmetric anchor propagation smears matchup-specific effects globally:
+  the Spirit-NAVI line partly prices a Spirit-specific H2H edge (11-2 in
+  the donk era), but the anchor moves NAVI -36 against *everyone*. The
+  player-level extension is the real fix.
 
 ## Extension path (the real version)
 
