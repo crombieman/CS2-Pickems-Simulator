@@ -1,5 +1,5 @@
 {
-  "comment": "Polymarket gamma mids, fetched 2026-06-11T06:53:11+00:00; normalized two-sided; consumed by live.py as pair overrides.",
+  "comment": "Polymarket gamma mids, fetched 2026-06-11T07:00:34+00:00; normalized two-sided; consumed by live.py as pair overrides.",
   "anchors": [
     {
       "a": "MongolZ",
@@ -13,21 +13,21 @@
       "b": "9z",
       "p": 0.565,
       "slug": "cs2-prv-9z-2026-06-11",
-      "volume": 463837
+      "volume": 463965
     },
     {
       "a": "FURIA",
       "b": "B8",
       "p": 0.735,
       "slug": "cs2-furia-b8-2026-06-11",
-      "volume": 222157
+      "volume": 222530
     },
     {
       "a": "MOUZ",
       "b": "Legacy",
       "p": 0.555,
       "slug": "cs2-mouz-lgc-2026-06-11",
-      "volume": 218005
+      "volume": 218305
     },
     {
       "a": "NAVI",

@@ -55,13 +55,24 @@ belong in advance slots rather than 3-0 slots.
 
 ## Data provenance (as committed)
 
-- `matches_2026.csv`: 87 verified series — complete Cologne Stage 2,
-  complete IEM Rio 2026, plus confirmed results from IEM Atlanta,
-  EPL S23, PGL Astana (full Stage-3-team coverage added in v2 refresh),
-  CS Asia Championships, IEM Kraków, BLAST Bounty/Rotterdam/Spring,
-  PGL Bucharest. Sourced from Liquipedia/HLTV/escharts coverage; v2
-  additions cross-verified against 2+ independent pages (two series
-  with contradictory sources were discarded rather than guessed).
+- `matches_2026.csv`: 92 verified series — complete Cologne Stage 2,
+  IEM Rio 2026, plus confirmed results from IEM Atlanta, EPL S23,
+  PGL Astana (full Stage-3-team coverage added in v2 refresh), CS Asia
+  Championships, IEM Kraków, BLAST Bounty/Rotterdam/Spring, PGL
+  Bucharest. v2+ additions cross-verified against 2+ independent pages
+  (contradictory-source series discarded rather than guessed).
+- Integrity audit (2026-06-11, pre-stage): all weight >= 0.85 rows and
+  all Cologne Stage 2 rows re-verified against event + team pages.
+  Found and fixed: 1 swapped result (TYLOO beat Astralis, Cologne S2
+  R3 — CSV had it reversed), 1 unverifiable row removed (Legacy-M80
+  "cs_asia" — absent from Legacy's documented run), 6 missing series
+  added (Falcons>Legacy and Legacy>MIBR and MIBR>B8 at CS Asia,
+  NAVI>BetBoom Atlanta SF, Vitality>G2 and Falcons>Spirit Rio UB).
+  Slate re-checked post-fix: entered picks remain argmax (3 seeds).
+  NOTE: the locked v1/v2/v3 prob tables were generated from the
+  pre-audit dataset and stay frozen — they are the pre-registered
+  forecasts the postmortem grades. Remaining known gap: ~11 Rio
+  0.65-weight rows verified single-source only; no contradictions.
 - `market_anchors.json`: refreshed 2026-06-10 evening (v2). All 8 R1
   matches from Polymarket gamma API exact two-sided mids ($101K-$472K
   volume per market, 1-cent spreads); GGbet cross-checks agree within
