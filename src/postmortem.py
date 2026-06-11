@@ -5,19 +5,21 @@ Usage (after the stage ends):
        {"Vitality": [3, 0], "FUT": [1, 3], ...}   (all 16 teams)
   2. python src/postmortem.py
 
-Grades BOTH locked probability tables on three binary events per team —
+Grades ALL locked probability tables on three binary events per team —
 exactly 3-0, advance (3-1/3-2), exactly 0-3 — against a uniform baseline
 (p30=2/16, padv=6/16, p03=2/16). Lower Brier is better.
 
-  v1: data/stage3_probs_locked_v1.json (2026-06-10 afternoon; 5 anchors,
-      73 series). The original pre-event lock.
-  v2: data/stage3_probs.json (2026-06-10 evening; 8 Polymarket anchors,
-      87 series). The refresh the final picks were made from.
+  v1: stage3_probs_locked_v1.json (06-10 afternoon; 5 anchors, 73 series).
+  v2: stage3_probs_locked_v2.json (06-10 evening; 8 Polymarket anchors,
+      87 series, full anchor propagation).
+  v3: stage3_probs.json (06-10 night; v2 data + pair overrides and
+      lambda=0.5 partial propagation). The final picks.
 
-The v1-vs-v2 skill comparison answers the question that matters: did the
-pre-event market/data refresh actually improve calibration? Also scores
-both slates' ticks. Per the README: the Brier table is the postmortem
-that matters, not whether a slate passed.
+The cross-version skill comparison answers the questions that matter:
+did the market/data refresh (v1->v2) and the propagation model change
+(v2->v3) each improve calibration? Also scores each slate's ticks. Per
+the README: the Brier table is the postmortem that matters, not whether
+a slate passed.
 """
 
 import json
@@ -25,20 +27,25 @@ from pathlib import Path
 
 DATA = Path(__file__).resolve().parent.parent / "data"
 
-# v1 locked slate (original lock, 2026-06-10 afternoon). Manual tie-break
-# vs pipeline argmax at the time: Falcons in 3-0 over FURIA.
-SLATE_V1 = {
-    "30": ["Vitality", "Falcons"],
-    "03": ["9z", "B8"],
-    "adv": ["Spirit", "NAVI", "FURIA", "MOUZ", "PARIVISION", "Aurora"],
-}
-# v2 final slate (re-lock on refreshed model, 2026-06-10 evening).
-# Pipeline argmax, stable across seeds 7/11/42/123.
-SLATE_V2 = {
-    "30": ["Vitality", "Spirit"],
-    "03": ["B8", "Monte"],
-    "adv": ["NAVI", "Falcons", "FURIA", "Aurora", "MOUZ", "G2"],
-}
+MODELS = [
+    ("v1 (5 anchors, 73 series)", "stage3_probs_locked_v1.json"),
+    ("v2 (8 anchors, 87 series, full propagation)", "stage3_probs_locked_v2.json"),
+    ("v3 (pair overrides, lambda=0.5) [final]", "stage3_probs.json"),
+]
+
+SLATES = [
+    # v1 original lock: manual tie-break, Falcons in 3-0 over FURIA argmax.
+    ("v1 slate (superseded)", {
+        "30": ["Vitality", "Falcons"], "03": ["9z", "B8"],
+        "adv": ["Spirit", "NAVI", "FURIA", "MOUZ", "PARIVISION", "Aurora"]}),
+    ("v2 slate (superseded)", {
+        "30": ["Vitality", "Spirit"], "03": ["B8", "Monte"],
+        "adv": ["NAVI", "Falcons", "FURIA", "Aurora", "MOUZ", "G2"]}),
+    # v3 final: pipeline argmax, stable across seeds 7/11/42/123.
+    ("v3 slate (FINAL PICKS)", {
+        "30": ["Vitality", "Spirit"], "03": ["B8", "Monte"],
+        "adv": ["NAVI", "Falcons", "FURIA", "Aurora", "MOUZ", "MongolZ"]}),
+]
 
 BASELINE = {"p30": 2 / 16, "padv": 6 / 16, "p03": 2 / 16}
 CATS = ("p30", "padv", "p03")
@@ -77,11 +84,11 @@ def score_ticks(name, slate, outcome):
 
 
 def main():
-    v1 = json.load(open(DATA / "stage3_probs_locked_v1.json"))["probs"]
-    v2 = json.load(open(DATA / "stage3_probs.json"))["probs"]
+    tables = [(name, json.load(open(DATA / fn))["probs"]) for name, fn in MODELS]
     results = {t: tuple(r) for t, r in
                json.load(open(DATA / "results_stage3.json")).items()}
-    assert set(results) == set(v1) == set(v2), "results must cover all 16 teams"
+    for name, probs in tables:
+        assert set(results) == set(probs), f"results must cover all 16 teams ({name})"
 
     outcome = {t: {"rec": rec,
                    "p30": rec == (3, 0),
@@ -89,15 +96,16 @@ def main():
                    "p03": rec == (0, 3)}
                for t, rec in results.items()}
 
-    m1 = brier_table("v1 model (original lock: 5 anchors, 73 series)", v1, outcome)
-    m2 = brier_table("v2 model (refresh: 8 anchors, 87 series)", v2, outcome)
+    means = [(name, brier_table(name, probs, outcome)) for name, probs in tables]
 
-    print(f"\n{'Refresh delta (v1-v2, + = refresh helped)':18s}" +
-          "".join(f"  {c}: {m1[c]-m2[c]:+.4f}" for c in CATS))
+    print("\nStep deltas (+ = the change helped):")
+    for (n_prev, m_prev), (n_next, m_next) in zip(means, means[1:]):
+        print(f"  {n_prev.split(' ')[0]} -> {n_next.split(' ')[0]}:" +
+              "".join(f"  {c}: {m_prev[c]-m_next[c]:+.4f}" for c in CATS))
 
     print()
-    score_ticks("v1 slate (superseded, not played)", SLATE_V1, outcome)
-    score_ticks("v2 slate (final picks)           ", SLATE_V2, outcome)
+    for name, slate in SLATES:
+        score_ticks(f"{name:28s}", slate, outcome)
 
 
 if __name__ == "__main__":

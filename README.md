@@ -25,11 +25,17 @@ Three calibration layers, in order of authority:
    Gaussian regularization (σ = 70 Elo) toward priors prevents
    sparse-sample blowups — e.g. a 3-0 Swiss run against a soft field
    moves a rating ~20 points, not 100.
-3. **Market anchoring** (`apply_market_anchors`): pairwise probabilities
-   forced to vig-free implied probs from liquid lines (bookmaker BO3
-   lines, traded Polymarket prices). Markets see what historical fits
-   can't (roster news, prep state); where a real line exists, it wins.
-   Shifts propagate to all simulated matchups for the affected teams.
+3. **Market anchoring** (`apply_market_anchors` + pair overrides): an
+   anchored matchup is always played at its exact vig-free market prob
+   when the pair meets (the market priced *that match*, including H2H
+   style and roster news). Only `ANCHOR_LAMBDA` (0.5) of the
+   market-vs-fit correction propagates into the ratings used for all
+   other matchups — a line's deviation from the fit mixes global info
+   (roster, form) with matchup-specific info (e.g. Spirit's H2H edge
+   over NAVI), and a single number can't be split per-pair without
+   player-level modeling. Slate sensitivity to lambda across [0, 1] is
+   one advance slot (MongolZ at lam <= 0.5 vs G2 at lam >= 0.75);
+   everything else is invariant.
 
 The simulator (`simulate.py`) plays the full Swiss endogenously: fixed
 Round 1, then record groups with Buchholz recomputed per round, high-vs-low
@@ -64,17 +70,29 @@ belong in advance slots rather than 3-0 slots.
   scale ratings are calibrated to. The original 5-anchor set
   (2026-06-09/10, thinner books) is superseded.
 
-## Final Stage 3 slate (v2 re-lock, 2026-06-10 evening)
+## Final Stage 3 slate (v3 re-lock, 2026-06-10 night)
 
 - **3-0:** Vitality, Spirit
 - **0-3:** B8, Monte
-- **Advance:** NAVI, Falcons, FURIA, Aurora, MOUZ, G2
-- Model P(≥5 correct) ≈ 0.43, E[ticks] ≈ 4.25
-- Pipeline argmax, stable across sim seeds 7/11/42/123 (including the
-  G2-vs-MongolZ last advance slot: G2 +0.003-0.006 P(≥5) on same sims).
+- **Advance:** NAVI, Falcons, FURIA, Aurora, MOUZ, MongolZ
+- Model P(≥5 correct) ≈ 0.42, E[ticks] ≈ 4.22
+- Pipeline argmax under the v3 model (pair overrides + lambda = 0.5),
+  stable across sim seeds 7/11/42/123 (MongolZ over the G2 variant by
+  +0.003-0.007 P(≥5) on same sims at every seed).
 
 Per-team probabilities as re-locked: `data/stage3_probs.json` (40k sims,
-seed 11). The superseded v1 table is `data/stage3_probs_locked_v1.json`.
+seed 11). Superseded tables: `data/stage3_probs_locked_v1.json`,
+`data/stage3_probs_locked_v2.json`.
+
+### v2 slate (2026-06-10 evening — superseded by v3 model change)
+
+- 3-0: Vitality, Spirit · 0-3: B8, Monte ·
+  Advance: NAVI, Falcons, FURIA, Aurora, MOUZ, **G2**
+- Same data as v3 but full anchor propagation (lambda = 1, no pair
+  overrides): each market line shifted both teams against *all*
+  opponents. The v3 model change scoped market lines to their own
+  matchup (+ partial propagation), which flipped the last advance slot
+  from G2 to MongolZ and nothing else.
 
 ### v1 slate (original lock, 2026-06-10 afternoon — superseded)
 
@@ -104,10 +122,13 @@ passed.
   layer can price them. Known at v2 lock: Brollan's last event with MOUZ,
   karrigan reportedly starting for Falcons, BetBoom stand-in churn +
   visa uncertainty (likely why MGLZ-BB sits at a coin flip).
-- Symmetric anchor propagation smears matchup-specific effects globally:
-  the Spirit-NAVI line partly prices a Spirit-specific H2H edge (11-2 in
-  the donk era), but the anchor moves NAVI -36 against *everyone*. The
-  player-level extension is the real fix.
+- The global-vs-matchup split of each market line is a judgment knob
+  (`ANCHOR_LAMBDA` = 0.5), not estimated from data. Pair overrides fix
+  the anchored match itself, but how much of e.g. Spirit's edge over
+  NAVI (11-2 donk-era H2H) carries to their other matchups is
+  unidentifiable at team level. Slate impact is confined to one advance
+  slot (MongolZ/G2). Per-pair decomposition is player-level
+  extension-path work.
 
 ## Extension path (the real version)
 
