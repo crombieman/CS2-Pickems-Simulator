@@ -1,13 +1,16 @@
 {
-  "completed": [],
-  "upcoming": [
+  "completed": [
+    [
+      "BetBoom",
+      "MongolZ"
+    ],
+    [
+      "9z",
+      "PARIVISION"
+    ],
     [
       "Vitality",
       "FUT"
-    ],
-    [
-      "NAVI",
-      "Spirit"
     ],
     [
       "MOUZ",
@@ -18,20 +21,18 @@
       "G2"
     ],
     [
-      "MongolZ",
-      "BetBoom"
-    ],
-    [
-      "Aurora",
-      "Monte"
-    ],
-    [
       "FURIA",
       "B8"
     ],
     [
-      "PARIVISION",
-      "9z"
+      "Aurora",
+      "Monte"
+    ]
+  ],
+  "upcoming": [
+    [
+      "NAVI",
+      "Spirit"
     ]
   ]
 }
