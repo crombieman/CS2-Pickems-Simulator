@@ -62,13 +62,24 @@ class TestOverrides(unittest.TestCase):
 
 
 class TestLockedRegression(unittest.TestCase):
-    """The committed stage3_probs.json (v3 lock) must reproduce exactly."""
+    """The committed stage3_probs.json (v3 lock) must reproduce exactly.
+
+    The locked tables were generated under the pre-fix seed order
+    (LEGACY_SEED); pin it for this test so the frozen artifacts stay
+    reproducible after the 2026-06-12 seed correction.
+    """
 
     def test_probs_reproduce(self):
+        import simulate
         ratings = json.load(open(DATA / "ratings_fitted.json"))
         locked = json.load(open(DATA / "stage3_probs.json"))
-        _, stats = run(ratings, n_sims=locked["meta"]["n_sims"],
-                       seed=locked["meta"]["seed"])
+        orig = simulate.SEED
+        simulate.SEED = simulate.LEGACY_SEED
+        try:
+            _, stats = run(ratings, n_sims=locked["meta"]["n_sims"],
+                           seed=locked["meta"]["seed"])
+        finally:
+            simulate.SEED = orig
         for t, want in locked["probs"].items():
             for k, v in want.items():
                 self.assertAlmostEqual(stats[t][k], v, places=9,

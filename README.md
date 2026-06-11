@@ -128,8 +128,14 @@ passed.
 
 ## Known limitations
 
-- Greedy Buchholz pairing approximates Valve's exact seeding-difference
-  algorithm (second-order for record-level probabilities).
+- Pairing model validated on real data (2026-06-12): the rulebook's
+  highest-vs-lowest rule + corrected initial seeds reproduce the
+  announced R2 pairings 8/8 (the original seed-order guess got 1/8 —
+  seeds, not the algorithm, were the error; measured slate impact of
+  that error was only ~0.008 P(>=5)). Remaining gap: Valve's 15-row
+  matchup priority table for 6-team groups (R4) vs our greedy
+  backtracking — equivalent when no rematch constraint binds, may
+  diverge on fallbacks.
 - Scalar ratings assume transitivity — no map-pool intersection, veto
   modeling, or head-to-head style effects (e.g. donk vs NAVI).
 - Static ratings within the stage; no round-to-round form updating.

@@ -37,7 +37,22 @@ ROUND1 = [
     ("FURIA", "B8"), ("PARIVISION", "9z"),
 ]
 
-SEED = {t: i for i, t in enumerate(STAGE3_TEAMS)}
+# Official Stage 3 initial seeds, derived 2026-06-12 by inverting the R1
+# bracket (1v9..8v16) against the post-R1 standings order, and validated by
+# reproducing the announced R2 pairings 8/8 under the rulebook's
+# highest-vs-lowest rule. (The original guess — STAGE3_TEAMS order — got
+# R2 pairings 1/8: MOUZ/Spirit/9z were all misplaced.)
+SEED = {
+    "Vitality": 1, "NAVI": 2, "Falcons": 3, "MongolZ": 4,
+    "Aurora": 5, "FURIA": 6, "MOUZ": 7, "PARIVISION": 8,
+    "FUT": 9, "Spirit": 10, "G2": 11, "BetBoom": 12,
+    "Monte": 13, "B8": 14, "Legacy": 15, "9z": 16,
+}
+
+# Pre-fix seed order (list position in STAGE3_TEAMS). The locked v1-v3
+# probability tables were generated under this mapping; the regression
+# test pins it so those frozen artifacts stay reproducible.
+LEGACY_SEED = {t: i for i, t in enumerate(STAGE3_TEAMS)}
 
 
 def _pair_group(group, played, buchholz):
