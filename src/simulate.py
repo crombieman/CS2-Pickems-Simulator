@@ -62,15 +62,68 @@ def _pair_group(group, played, buchholz):
     return backtrack(ordered)
 
 
-def simulate_stage(ratings, rng: random.Random):
-    """One full Swiss stage. Returns {team: (wins, losses)} final records."""
+def make_state(completed, upcoming=()):
+    """Build a resume state from real results.
+
+    completed: iterable of (winner, loser) for every finished match.
+    upcoming: iterable of (a, b) scheduled-but-unplayed pairings (use this
+      whenever the next round's real pairings are announced, or mid-round —
+      Valve's exact seeding-difference pairing can differ from our greedy
+      approximation, so real pairings always beat simulated ones).
+    """
     wins = collections.Counter()
     losses = collections.Counter()
     played = {t: set() for t in STAGE3_TEAMS}
     opponents = {t: [] for t in STAGE3_TEAMS}
-    final = {}
-    matches = ROUND1
-    while matches:
+    for w, l in completed:
+        wins[w] += 1
+        losses[l] += 1
+        played[w].add(l)
+        played[l].add(w)
+        opponents[w].append(l)
+        opponents[l].append(w)
+    if not upcoming:
+        # Without forced pairings we can only pair by record group, which
+        # is wrong mid-round (a 1-0 team awaiting its R2 game would be
+        # grouped against 1-1 teams). Require a round boundary.
+        active = [t for t in STAGE3_TEAMS if wins[t] < 3 and losses[t] < 3]
+        games = {wins[t] + losses[t] for t in active}
+        assert len(games) <= 1, (
+            "mid-round state: supply the remaining scheduled pairings "
+            f"via 'upcoming' (games played varies: {sorted(games)})")
+    return {"wins": wins, "losses": losses, "played": played,
+            "opponents": opponents, "matches": [tuple(m) for m in upcoming]}
+
+
+def simulate_stage(ratings, rng: random.Random, state=None):
+    """One full Swiss stage (optionally resumed from a real mid-stage
+    state — see make_state). Returns {team: (wins, losses)} final records."""
+    if state is None:
+        wins = collections.Counter()
+        losses = collections.Counter()
+        played = {t: set() for t in STAGE3_TEAMS}
+        opponents = {t: [] for t in STAGE3_TEAMS}
+        matches = ROUND1
+    else:
+        wins = state["wins"].copy()
+        losses = state["losses"].copy()
+        played = {t: set(s) for t, s in state["played"].items()}
+        opponents = {t: list(o) for t, o in state["opponents"].items()}
+        matches = list(state["matches"])
+    final = {t: (wins[t], losses[t]) for t in STAGE3_TEAMS
+             if wins[t] == 3 or losses[t] == 3}
+    while True:
+        if not matches:
+            buchholz = {t: sum(wins[o] - losses[o] for o in opponents[t])
+                        for t in STAGE3_TEAMS}
+            groups = collections.defaultdict(list)
+            for t in STAGE3_TEAMS:
+                if t not in final:
+                    groups[(wins[t], losses[t])].append(t)
+            for grp in groups.values():
+                matches += _pair_group(grp, played, buchholz)
+            if not matches:
+                return final
         for a, b in matches:
             w, l = (a, b) if rng.random() < match_prob(ratings, a, b) else (b, a)
             wins[w] += 1
@@ -82,16 +135,7 @@ def simulate_stage(ratings, rng: random.Random):
         for t in STAGE3_TEAMS:
             if t not in final and (wins[t] == 3 or losses[t] == 3):
                 final[t] = (wins[t], losses[t])
-        buchholz = {t: sum(wins[o] - losses[o] for o in opponents[t])
-                    for t in STAGE3_TEAMS}
-        groups = collections.defaultdict(list)
-        for t in STAGE3_TEAMS:
-            if t not in final:
-                groups[(wins[t], losses[t])].append(t)
         matches = []
-        for grp in groups.values():
-            matches += _pair_group(grp, played, buchholz)
-    return final
 
 
 def run(ratings, n_sims=40000, seed=11):
