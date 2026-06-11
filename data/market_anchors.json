@@ -1,10 +1,13 @@
 {
-  "comment": "Vig-free implied probabilities from live markets, pre-Stage-3 lock (2026-06-10). Sources: GGbet via tips.gg (Vitality-FUT, Falcons-G2, Aurora-Monte), Polymarket traded prices (MOUZ-Legacy $19K vol, MongolZ-BetBoom $32K vol).",
+  "comment": "Vig-free implied probabilities, refreshed 2026-06-10 evening ET (v2, pre-Stage-3 lock). All 8 R1 matches from Polymarket gamma API exact two-sided mids (each pair sums to 1.000, 1-cent spreads). Volumes: VIT-FUT $101K, MOUZ-LGC $191K, MGLZ-BB $472K, FAL-G2 $124K, AUR-MNT $115K, SPI-NAVI $167K, FUR-B8 $219K, PRV-9z $404K. GGbet cross-checks via aggregators agree within ~2pts where available (FURIA-B8 books ~0.715 vs PM 0.735; deeper PM book preferred per convention). v1 anchors (5 matches, 2026-06-09/10 GGbet + thin Polymarket) superseded.",
   "anchors": [
-    {"a": "Vitality", "b": "FUT",     "p": 0.791},
-    {"a": "MOUZ",     "b": "Legacy",  "p": 0.570},
-    {"a": "MongolZ",  "b": "BetBoom", "p": 0.510},
-    {"a": "Falcons",  "b": "G2",      "p": 0.665},
-    {"a": "Aurora",   "b": "Monte",   "p": 0.605}
+    {"a": "Vitality", "b": "FUT",     "p": 0.825},
+    {"a": "MOUZ",     "b": "Legacy",  "p": 0.555},
+    {"a": "MongolZ",  "b": "BetBoom", "p": 0.495},
+    {"a": "Falcons",  "b": "G2",      "p": 0.625},
+    {"a": "Aurora",   "b": "Monte",   "p": 0.645},
+    {"a": "Spirit",   "b": "NAVI",    "p": 0.645},
+    {"a": "FURIA",    "b": "B8",      "p": 0.735},
+    {"a": "PARIVISION", "b": "9z",    "p": 0.555}
   ]
 }
