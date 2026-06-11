@@ -18,7 +18,18 @@ Known approximations (second-order for advance/3-0/0-3 probabilities):
 import collections
 import random
 
-from model import STAGE3_TEAMS, win_prob
+from model import STAGE3_TEAMS, load_pair_overrides, win_prob
+
+# Anchored matchups play at the exact market prob whenever the pair meets;
+# everything else runs off ratings (which carry only the lam-propagated
+# share of the market corrections — see model.ANCHOR_LAMBDA).
+PAIR_OVERRIDES = load_pair_overrides()
+
+
+def match_prob(ratings, a: str, b: str) -> float:
+    p = PAIR_OVERRIDES.get((a, b))
+    return p if p is not None else win_prob(ratings, a, b)
+
 
 ROUND1 = [
     ("Vitality", "FUT"), ("NAVI", "Spirit"), ("MOUZ", "Legacy"),
@@ -61,7 +72,7 @@ def simulate_stage(ratings, rng: random.Random):
     matches = ROUND1
     while matches:
         for a, b in matches:
-            w, l = (a, b) if rng.random() < win_prob(ratings, a, b) else (b, a)
+            w, l = (a, b) if rng.random() < match_prob(ratings, a, b) else (b, a)
             wins[w] += 1
             losses[l] += 1
             played[a].add(b)

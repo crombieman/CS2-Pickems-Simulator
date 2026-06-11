@@ -22,10 +22,12 @@ def main():
     for t in sorted(STAGE3_TEAMS, key=lambda t: -anchored[t]):
         print(f"{t:12s} {PRIORS[t]:6.0f} {fitted[t]:7.0f} {anchored[t]:9.0f}")
 
-    print("\nRound 1 model probabilities:")
-    from simulate import ROUND1
+    print("\nRound 1 probabilities (played = market override; rating-implied"
+          " shows what propagated ratings alone would give):")
+    from simulate import ROUND1, match_prob
     for a, b in ROUND1:
-        print(f"  {a} over {b}: {win_prob(anchored, a, b):.3f}")
+        print(f"  {a} over {b}: played {match_prob(anchored, a, b):.3f}"
+              f"  (rating-implied {win_prob(anchored, a, b):.3f})")
 
     out = {t: anchored[t] for t in STAGE3_TEAMS}
     json.dump(out, open(DATA / "ratings_fitted.json", "w"), indent=2)

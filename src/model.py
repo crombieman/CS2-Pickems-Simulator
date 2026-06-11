@@ -80,22 +80,48 @@ def fit_bradley_terry(matches, priors=PRIORS, sigma_s3=70.0, sigma_other=50.0,
     return {t: r + shift for t, r in ratings.items()}
 
 
-def apply_market_anchors(ratings: dict, anchors_path: Path = DATA / "market_anchors.json"):
-    """Force pairwise probs to match vig-free market lines via symmetric shifts.
+# Fraction of the market-vs-fit correction that propagates into ratings used
+# for NON-anchored matchups (rounds 2-5 cross-pairings). The anchored pair
+# itself always plays at the exact market prob via pair overrides in the
+# simulator. 1.0 = old behavior (a line moves a team against everyone);
+# 0.0 = lines only affect their own match. 0.5 because a line's deviation
+# from the fit mixes global info (roster news, form) with matchup-specific
+# info (H2H style, e.g. Spirit-NAVI) and a single number can't be decomposed
+# per-pair without player-level modeling. Slate sensitivity to this knob is
+# one advance slot (MongolZ vs G2 at lam ~0.6); everything else is stable
+# across the full [0, 1] range.
+ANCHOR_LAMBDA = 0.5
+
+
+def apply_market_anchors(ratings: dict, anchors_path: Path = DATA / "market_anchors.json",
+                         lam: float = ANCHOR_LAMBDA):
+    """Shift ratings toward vig-free market lines via partial symmetric shifts.
 
     Markets aggregate information the historical fit can't see (roster news,
-    prep state), so where a liquid line exists it overrides the fit for that
-    pair. Shifts propagate: a team moved down is weaker in ALL simulated
-    matchups, not just the anchored one.
+    prep state). The anchored matchup itself is played at the exact market
+    prob (see load_pair_overrides / simulate.match_prob); only lam of the
+    correction propagates to each team's OTHER matchups.
     """
     ratings = dict(ratings)
     for anc in json.load(open(anchors_path))["anchors"]:
         a, b, p = anc["a"], anc["b"], anc["p"]
         needed_gap = math.log10(p / (1 - p)) * 400.0
-        delta = (needed_gap - (ratings[a] - ratings[b])) / 2.0
+        delta = lam * (needed_gap - (ratings[a] - ratings[b])) / 2.0
         ratings[a] += delta
         ratings[b] -= delta
     return ratings
+
+
+def load_pair_overrides(anchors_path: Path = DATA / "market_anchors.json") -> dict:
+    """{(a, b): P(a beats b)} for every anchored pair, both orientations.
+    Where the market priced a specific match, that prob is used verbatim
+    whenever the two teams meet (R1 always; later rematches are rare under
+    Swiss rematch avoidance)."""
+    overrides = {}
+    for anc in json.load(open(anchors_path))["anchors"]:
+        overrides[(anc["a"], anc["b"])] = anc["p"]
+        overrides[(anc["b"], anc["a"])] = 1.0 - anc["p"]
+    return overrides
 
 
 def devig(odds_a: float, odds_b: float) -> float:
