@@ -79,6 +79,11 @@ belong in advance slots rather than 3-0 slots.
 - Pipeline argmax under the v3 model (pair overrides + lambda = 0.5),
   stable across sim seeds 7/11/42/123 (MongolZ over the G2 variant by
   +0.003-0.007 P(≥5) on same sims at every seed).
+- **Honest interval** (`src/posterior.py`, Laplace posterior over
+  ratings, 200 draws x 2000 sims): P(≥5) = 0.40 [0.32-0.48]. The point
+  estimate conditions on fitted ratings being exact; rating posterior
+  sd is ~62 Elo (sparse data barely tightens the priors), so per-team
+  tail probabilities carry ±0.05-0.10 of parameter uncertainty.
 
 Per-team probabilities as re-locked: `data/stage3_probs.json` (40k sims,
 seed 11). Superseded tables: `data/stage3_probs_locked_v1.json`,
