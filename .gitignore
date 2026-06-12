@@ -1,7 +1,7 @@
-# AI working artifacts — local only
+# AI working artifacts + docs — local only
 memory/
 .claude/
-docs/plans/
+docs/
 MEMORY.md
 tasks/
 
