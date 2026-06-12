@@ -136,7 +136,11 @@ class Archiver:
             with gzip.open(chunk, "at") as f:
                 f.write(line + "\n")
 
-            state["next_offset"] = offset + LIMIT
+            # Advance by ROWS RECEIVED, not LIMIT: the tail page is partial,
+            # and matches added upstream later occupy offsets starting at
+            # offset+len(results). Advancing by LIMIT there would silently
+            # skip them on the next top-up run.
+            state["next_offset"] = offset + len(page["results"])
             state["total_count_last_seen"] = total
             pages_in_chunk = (offset // LIMIT) % self.pages_per_chunk
             if pages_in_chunk == self.pages_per_chunk - 1:
@@ -155,17 +159,18 @@ class Archiver:
 def verify_archive(data_dir=DATA):
     """Integrity report: every line parses, offsets contiguous, row total."""
     data_dir = Path(data_dir)
-    offsets, rows = [], 0
+    pages = {}   # offset -> row count (latest fetch wins on duplicates)
     for chunk in sorted(data_dir.glob("matches_*.jsonl.gz")):
         with gzip.open(chunk, "rt") as f:
             for line in f:
                 rec = json.loads(line)
                 page = json.loads(rec["body"])
-                offsets.append(rec["offset"])
-                rows += len(page["results"])
-    offsets.sort()
-    contiguous = all(b - a == LIMIT for a, b in zip(offsets, offsets[1:]))
-    return {"pages": len(offsets), "rows": rows,
+                pages[rec["offset"]] = len(page["results"])
+    offsets = sorted(pages)
+    # Contiguity = the ROW CHAIN: each page starts exactly where the
+    # previous page's rows ended (pages may be partial at any tail).
+    contiguous = all(b == a + pages[a] for a, b in zip(offsets, offsets[1:]))
+    return {"pages": len(offsets), "rows": sum(pages.values()),
             "offsets_contiguous": contiguous,
             "first_offset": offsets[0] if offsets else None,
             "last_offset": offsets[-1] if offsets else None}

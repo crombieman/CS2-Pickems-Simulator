@@ -1,0 +1,37 @@
+name: bo3gg-archive
+
+on:
+  schedule:
+    - cron: "43 4 * * *"   # daily 04:43 UTC (off-peak minute; avoids the
+                           # odds-archive :17 slots and GH :00 congestion)
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: bo3gg-archive
+  cancel-in-progress: false
+
+jobs:
+  topup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # pure stdlib — no pip install needed
+      - name: Top-up archive from cursor (cap guards against runaway)
+        run: python src/bo3gg_archive.py --max-pages 30
+      - name: Verify archive integrity
+        run: python src/bo3gg_archive.py --verify
+      - name: Commit new chunks if changed
+        run: |
+          git config user.name "bo3gg-archive-bot"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/bo3gg
+          git diff --cached --quiet || git commit -m "chore: bo3gg archive top-up [skip ci]"
+          git pull --rebase origin master
+          git push

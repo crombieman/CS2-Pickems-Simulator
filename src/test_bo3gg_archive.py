@@ -51,7 +51,9 @@ class TestArchiver(unittest.TestCase):
         a = self.archiver()
         a.run()
         state = json.load(open(self.dir / "state.json"))
-        self.assertEqual(state["next_offset"], 300)  # 3 pages of 100 fetched
+        # Cursor advances by ROWS RECEIVED (partial tail page = 50 rows),
+        # so new matches appended upstream land exactly at the cursor.
+        self.assertEqual(state["next_offset"], 250)
         chunks = sorted(self.dir.glob("matches_*.jsonl.gz"))
         self.assertEqual(len(chunks), 2)  # 3 pages at 2 per chunk
         lines = []
@@ -69,10 +71,23 @@ class TestArchiver(unittest.TestCase):
         self.assertEqual(fetch.calls, [0])
         a2 = self.archiver(fetch=fetch)
         a2.run()
-        # offset 300 is the tail probe (0 results, not archived) — required
+        # offset 250 is the tail probe (0 results, not archived) — required
         # so a top-up run can discover new matches. No offset fetched twice.
-        self.assertEqual(fetch.calls, [0, 100, 200, 300])
+        self.assertEqual(fetch.calls, [0, 100, 200, 250])
         self.assertEqual(len(fetch.calls), len(set(fetch.calls)))
+
+    def test_topup_resumes_at_true_tail_when_dataset_grows(self):
+        # Backfill against total=250 (tail page partial: 50 rows), then the
+        # dataset grows to 280: the top-up must fetch offset 250 and pick up
+        # exactly the 30 new matches — no skip, no overlap.
+        fetch = make_fetch(total=250)
+        self.archiver(fetch=fetch).run()
+        grown = make_fetch(total=280)
+        self.archiver(fetch=grown).run()
+        self.assertEqual(grown.calls[0], 250)
+        report = verify_archive(self.dir)
+        self.assertEqual(report["rows"], 280)
+        self.assertTrue(report["offsets_contiguous"])
 
     def test_max_pages_caps_run(self):
         a = self.archiver()
@@ -94,7 +109,7 @@ class TestArchiver(unittest.TestCase):
         a = self.archiver(fetch=fetch, max_tries=3)
         a.run()
         state = json.load(open(self.dir / "state.json"))
-        self.assertEqual(state["next_offset"], 300)
+        self.assertEqual(state["next_offset"], 250)
 
     def test_malformed_body_aborts_without_advancing_state(self):
         a = self.archiver(fetch=make_fetch(bodies={100: "<html>cf block</html>"}))
