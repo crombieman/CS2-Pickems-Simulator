@@ -1,0 +1,20 @@
+{
+  "comment": "Per-match Stage 3 results, filled as rounds finish. a/b = announced orientation; winner two-source verified (resolved Polymarket + Liquipedia); start = scheduled start, UTC (Liquipedia CEST - 2h). Consumed by postmortem_matches.py.",
+  "matches": [
+    {"a": "BetBoom", "b": "MongolZ", "winner": "BetBoom", "start": "2026-06-11T09:00:00+00:00", "round": "R1"},
+    {"a": "9z", "b": "PARIVISION", "winner": "9z", "start": "2026-06-11T09:00:00+00:00", "round": "R1"},
+    {"a": "Vitality", "b": "FUT", "winner": "Vitality", "start": "2026-06-11T12:10:00+00:00", "round": "R1"},
+    {"a": "MOUZ", "b": "Legacy", "winner": "MOUZ", "start": "2026-06-11T12:10:00+00:00", "round": "R1"},
+    {"a": "FURIA", "b": "B8", "winner": "FURIA", "start": "2026-06-11T14:10:00+00:00", "round": "R1"},
+    {"a": "Falcons", "b": "G2", "winner": "Falcons", "start": "2026-06-11T15:05:00+00:00", "round": "R1"},
+    {"a": "Aurora", "b": "Monte", "winner": "Aurora", "start": "2026-06-11T16:30:00+00:00", "round": "R1"},
+    {"a": "Spirit", "b": "NAVI", "winner": "Spirit", "start": "2026-06-11T18:40:00+00:00", "round": "R1"},
+    {"a": "FURIA", "b": "MOUZ", "winner": "FURIA", "start": "2026-06-12T09:00:00+00:00", "round": "R2"},
+    {"a": "MongolZ", "b": "B8", "winner": "MongolZ", "start": "2026-06-12T09:00:00+00:00", "round": "R2"},
+    {"a": "PARIVISION", "b": "Monte", "winner": "Monte", "start": "2026-06-12T11:30:00+00:00", "round": "R2"},
+    {"a": "FUT", "b": "G2", "winner": "G2", "start": "2026-06-12T12:10:00+00:00", "round": "R2"},
+    {"a": "NAVI", "b": "Legacy", "winner": "NAVI", "start": "2026-06-12T14:40:00+00:00", "round": "R2"},
+    {"a": "Falcons", "b": "BetBoom", "winner": "BetBoom", "start": "2026-06-12T15:10:00+00:00", "round": "R2"},
+    {"a": "Vitality", "b": "9z", "winner": "9z", "start": "2026-06-12T16:45:00+00:00", "round": "R2"}
+  ]
+}
