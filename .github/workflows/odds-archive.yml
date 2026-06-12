@@ -36,3 +36,5 @@ jobs:
           git commit -m "chore: odds snapshot [skip ci]"
           git pull --rebase origin master
           git push
+
+# registration nudge: indexer missed the initial non-default-branch push
