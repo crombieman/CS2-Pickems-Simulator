@@ -116,6 +116,12 @@ belong in advance slots rather than 3-0 slots.
   pre-audit dataset and stay frozen — they are the pre-registered
   forecasts the postmortem grades. Remaining known gap: ~11 Rio
   0.65-weight rows verified single-source only; no contradictions.
+- `data/bo3gg/`: archive-first raw capture of bo3.gg's internal API —
+  all 71,447 finished CS matches (2020-06 onward), every API response
+  persisted verbatim in append-only gzip chunks (15.4MB), integrity-
+  verified (contiguous pages, row count matches the API total).
+  Backfilled 2026-06-12; top-ups resume from `state.json`. Raw archive
+  only — parsing/cross-validation is the Phase 2.2 follow-up slice.
 - `market_anchors.json`: refreshed 2026-06-10 evening (v2). All 8 R1
   matches from Polymarket gamma API exact two-sided mids ($101K-$472K
   volume per market, 1-cent spreads); GGbet cross-checks agree within
