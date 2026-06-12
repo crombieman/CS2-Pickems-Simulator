@@ -324,7 +324,7 @@ def main():
               if abs(results[i]["means"][OBJECTIVE] - top_mean) > 1e-12),
              1)
     if j > 1:
-        print(f"\n({j} picks tied on P({OBJECTIVE}) — the non-champion-side "
+        print(f"\n({j} picks tied on P({OBJECTIVE}) -- the non-champion-side "
               f"SF slot is free under this objective; tie-broken by "
               f"E[correct], then P(champion).)")
     mean_d, se_d = paired_margin(results[0]["draw_values"],

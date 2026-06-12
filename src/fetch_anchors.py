@@ -113,7 +113,7 @@ def append_archive(rows, path=DATA / "odds_archive.jsonl"):
             f.write(json.dumps(r) + "\n")
 
 
-def write_live_anchors(rows, path=DATA / "live_anchors.json"):
+def _write_anchors(rows, path, consumer):
     anchors = []
     for r in rows:
         if r["volume"] < MIN_VOLUME or len(r["outcomes"]) != 2:
@@ -129,16 +129,29 @@ def write_live_anchors(rows, path=DATA / "live_anchors.json"):
         anchors.append({"a": a, "b": b, "p": round(r["prices"][0], 4),
                         "slug": r["slug"], "volume": round(r["volume"])})
     out = {"comment": f"Polymarket gamma mids, fetched {rows[0]['ts'] if rows else '?'}; "
-                      "normalized two-sided; consumed by live.py as pair overrides.",
+                      f"normalized two-sided; consumed by {consumer}.",
            "anchors": anchors}
-    json.dump(out, open(path, "w"), indent=2)
+    with open(path, "w") as f:
+        json.dump(out, f, indent=2)
     return anchors
+
+
+def write_live_anchors(rows, path=DATA / "live_anchors.json"):
+    return _write_anchors(rows, path, "live.py as pair overrides")
+
+
+def write_playoff_anchors(rows, path=DATA / "playoff_anchors.json"):
+    """Lock-day step: QF (and later SF/final) lines -> playoff_anchors.json,
+    consumed verbatim by playoffs.py (the market prices the actual format)."""
+    return _write_anchors(rows, path, "playoffs.py as series-prob overrides")
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--live-anchors", action="store_true",
                     help="also write data/live_anchors.json for live.py")
+    ap.add_argument("--playoff-anchors", action="store_true",
+                    help="also write data/playoff_anchors.json for playoffs.py")
     ap.add_argument("--event", default=EVENT_FILTER)
     args = ap.parse_args()
 
@@ -156,6 +169,9 @@ def main():
     if args.live_anchors:
         anchors = write_live_anchors(rows)
         print(f"Wrote {len(anchors)} live anchors -> data/live_anchors.json")
+    if args.playoff_anchors:
+        anchors = write_playoff_anchors(rows)
+        print(f"Wrote {len(anchors)} playoff anchors -> data/playoff_anchors.json")
 
 
 if __name__ == "__main__":
