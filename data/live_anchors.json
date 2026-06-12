@@ -1,12 +1,47 @@
 {
-  "comment": "Polymarket gamma mids, fetched 2026-06-11T20:40:19+00:00; normalized two-sided; consumed by live.py as pair overrides.",
+  "comment": "Polymarket gamma mids, fetched 2026-06-12T00:48:05+00:00; normalized two-sided; consumed by live.py as pair overrides.",
   "anchors": [
     {
+      "a": "MongolZ",
+      "b": "B8",
+      "p": 0.655,
+      "slug": "cs2-mglz-b8-2026-06-12",
+      "volume": 47001
+    },
+    {
+      "a": "FURIA",
+      "b": "MOUZ",
+      "p": 0.585,
+      "slug": "cs2-furia-mouz-2026-06-12",
+      "volume": 44826
+    },
+    {
       "a": "NAVI",
-      "b": "Spirit",
-      "p": 0.005,
-      "slug": "cs2-navi-ts7-2026-06-11",
-      "volume": 1551811
+      "b": "Legacy",
+      "p": 0.685,
+      "slug": "cs2-navi-lgc-2026-06-12",
+      "volume": 37478
+    },
+    {
+      "a": "Falcons",
+      "b": "BetBoom",
+      "p": 0.675,
+      "slug": "cs2-fal2-bb3-2026-06-12",
+      "volume": 32892
+    },
+    {
+      "a": "PARIVISION",
+      "b": "Monte",
+      "p": 0.555,
+      "slug": "cs2-prv-mnte-2026-06-12",
+      "volume": 31780
+    },
+    {
+      "a": "FUT",
+      "b": "G2",
+      "p": 0.535,
+      "slug": "cs2-fut-g2-2026-06-12",
+      "volume": 26314
     }
   ]
 }

@@ -53,8 +53,8 @@ ALIASES = {
 }
 
 
-def fetch_page(offset):
-    url = (f"{GAMMA}?closed=false&order=volume24hr&ascending=false"
+def fetch_page(offset, order="volume24hr"):
+    url = (f"{GAMMA}?closed=false&order={order}&ascending=false"
            f"&limit=100&offset={offset}")
     # Polymarket's CDN 403s urllib's default Python-urllib UA; curl-like is fine.
     req = urllib.request.Request(url, headers={
@@ -68,34 +68,42 @@ def _maybe_json(v):
 
 
 def snapshot(event_filter=EVENT_FILTER, pages=PAGES):
+    """Two discovery passes: by 24h volume (active markets) AND newest-first
+    (brand-new markets have ~zero volume24hr and are invisible to the volume
+    sort — learned 2026-06-12 when R2 markets didn't surface). Dedup by slug."""
     ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    rows = []
-    for page in range(pages):
-        try:
-            markets = fetch_page(page * 100)
-        except OSError as e:
-            print(f"page {page} fetch failed: {e}")
-            break
-        if not markets:
-            break
-        for m in markets:
-            q = m.get("question") or ""
-            if "Counter-Strike" not in q or event_filter not in q:
-                continue
-            outcomes = _maybe_json(m.get("outcomes"))
-            prices = [float(p) for p in _maybe_json(m.get("outcomePrices"))]
-            total = sum(prices)
-            rows.append({
-                "ts": ts,
-                "slug": m.get("slug"),
-                "question": q,
-                "outcomes": outcomes,
-                "prices": [p / total for p in prices] if total else prices,
-                "raw_prices": prices,
-                "volume": float(m.get("volumeNum") or 0),
-                "liquidity": float(m.get("liquidityNum") or 0),
-                "end_date": m.get("endDate"),
-            })
+    rows, seen = [], set()
+    for order in ("volume24hr", "id"):
+        for page in range(pages):
+            try:
+                markets = fetch_page(page * 100, order=order)
+            except OSError as e:
+                print(f"page {page} ({order}) fetch failed: {e}")
+                break
+            if not markets:
+                break
+            for m in markets:
+                q = m.get("question") or ""
+                slug = m.get("slug")
+                if "Counter-Strike" not in q or event_filter not in q:
+                    continue
+                if slug in seen:
+                    continue
+                seen.add(slug)
+                outcomes = _maybe_json(m.get("outcomes"))
+                prices = [float(p) for p in _maybe_json(m.get("outcomePrices"))]
+                total = sum(prices)
+                rows.append({
+                    "ts": ts,
+                    "slug": slug,
+                    "question": q,
+                    "outcomes": outcomes,
+                    "prices": [p / total for p in prices] if total else prices,
+                    "raw_prices": prices,
+                    "volume": float(m.get("volumeNum") or 0),
+                    "liquidity": float(m.get("liquidityNum") or 0),
+                    "end_date": m.get("endDate"),
+                })
     return rows
 
 
@@ -109,6 +117,10 @@ def write_live_anchors(rows, path=DATA / "live_anchors.json"):
     anchors = []
     for r in rows:
         if r["volume"] < MIN_VOLUME or len(r["outcomes"]) != 2:
+            continue
+        # Skip resolving/near-settled markets (p ~ 1.0): they're finished
+        # matches, not forecasts, and would poison the override table.
+        if max(r["prices"]) > 0.95:
             continue
         a = ALIASES.get(r["outcomes"][0].strip().lower())
         b = ALIASES.get(r["outcomes"][1].strip().lower())
