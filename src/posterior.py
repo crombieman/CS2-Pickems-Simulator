@@ -82,14 +82,35 @@ def pct(sorted_xs, q):
     return sorted_xs[i]
 
 
-def main():
+def laplace_factor():
+    """(map_ratings, teams, L): MAP fit + Cholesky factor of the posterior
+    Hessian — everything needed to draw rating vectors. Factored out so
+    other decision layers (playoffs.py) can reuse the draws."""
     matches = load_matches()
     map_ratings = fit_bradley_terry(matches)
     teams = sorted(PRIORS)
     sigma = {t: (70.0 if t in STAGE3_TEAMS else 50.0) for t in teams}
+    return map_ratings, teams, cholesky(hessian(matches, map_ratings,
+                                                teams, sigma))
 
-    H = hessian(matches, map_ratings, teams, sigma)
-    L = cholesky(H)
+
+def rating_draws(k=K_SAMPLES, seed=SEED, lam=ANCHOR_LAMBDA, factor=None):
+    """k anchored rating dicts drawn from the Laplace posterior.
+    Pass a precomputed laplace_factor() to amortize the fit (e.g. when
+    sweeping lam: same seed -> same offsets, so the comparison is
+    controlled)."""
+    map_ratings, teams, L = factor if factor is not None else laplace_factor()
+    rng = random.Random(seed)
+    draws = []
+    for _ in range(k):
+        off = sample_offsets(L, rng)
+        sampled = {t: map_ratings[t] + off[i] for i, t in enumerate(teams)}
+        draws.append(apply_market_anchors(sampled, lam=lam))
+    return draws
+
+
+def main():
+    map_ratings, teams, L = laplace_factor()
     rng = random.Random(SEED)
 
     marginal_sd = {}  # quick visibility into posterior width per team

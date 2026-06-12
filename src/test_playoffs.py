@@ -10,9 +10,9 @@ import unittest
 from pathlib import Path
 
 from model import STAGE3_TEAMS
-from playoffs import (RECORD_MULTISET, bracket_distribution, map_prob,
-                      playoff_seeds, quarterfinals, series_prob_bo5,
-                      stage3_final_state)
+from playoffs import (RECORD_MULTISET, all_picks, bracket_distribution,
+                      map_prob, optimize_picks, playoff_seeds, quarterfinals,
+                      score_pick, series_prob_bo5, stage3_final_state)
 from simulate import ROUND1, SEED, _pair_group, match_prob, simulate_stage
 
 DATA = Path(__file__).resolve().parent.parent / "data"
@@ -183,6 +183,101 @@ class TestEnumeration(unittest.TestCase):
         self.assertTrue(any(bo5 for *_, bo5 in calls))
         for a, b, bo5 in calls:
             self.assertEqual(bo5, (a in top) != (b in top))
+
+
+def seed_chalk_prob(seeds):
+    """Lower seed number always wins (deterministic bracket)."""
+    rank = {t: i for i, t in enumerate(seeds)}
+
+    def prob(a, b, bo5=False):
+        return 1.0 if rank[a] < rank[b] else 0.0
+    return prob
+
+
+class TestPickScoring(unittest.TestCase):
+    SEEDS = ["s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8"]
+
+    def test_all_picks_count_and_consistency(self):
+        picks = all_picks(self.SEEDS)
+        self.assertEqual(len(picks), 128)
+        self.assertEqual(len(set(picks)), 128)
+        qfs = quarterfinals(self.SEEDS)
+        for qf_w, sf_w, champ in picks:
+            for (a, b), w in zip(qfs, qf_w):
+                self.assertIn(w, (a, b))
+            self.assertIn(sf_w[0], qf_w[:2])
+            self.assertIn(sf_w[1], qf_w[2:])
+            self.assertIn(champ, sf_w)
+
+    def test_deterministic_bracket_scoring(self):
+        branches = bracket_distribution(self.SEEDS, seed_chalk_prob(self.SEEDS))
+        truth = (("s1", "s4", "s2", "s3"), ("s1", "s2"), "s1")
+        s = score_pick(branches, truth)
+        self.assertAlmostEqual(s["challenges"], 1.0, places=12)
+        self.assertAlmostEqual(s["champion"], 1.0, places=12)
+        self.assertAlmostEqual(s["expected_correct"], 7.0, places=12)
+        self.assertAlmostEqual(s["perfect"], 1.0, places=12)
+        # same bracket but wrong champion: challenges joint fails
+        wrong_champ = (truth[0], truth[1], "s2")
+        s = score_pick(branches, wrong_champ)
+        self.assertAlmostEqual(s["challenges"], 0.0, places=12)
+        self.assertAlmostEqual(s["champion"], 0.0, places=12)
+        self.assertAlmostEqual(s["expected_correct"], 6.0, places=12)
+
+    def test_uniform_hand_computed_values(self):
+        branches = bracket_distribution(self.SEEDS,
+                                        lambda a, b, bo5=False: 0.5)
+        for pick in (all_picks(self.SEEDS)[0], all_picks(self.SEEDS)[77]):
+            s = score_pick(branches, pick)
+            # E = 4*0.5 + 2*0.25 + 0.125
+            self.assertAlmostEqual(s["expected_correct"], 2.625, places=12)
+            self.assertAlmostEqual(s["perfect"], 1 / 128, places=12)
+            self.assertAlmostEqual(s["champion"], 0.125, places=12)
+            # champ correct (0.125) implies its QF+SF correct, so the
+            # joint needs only >=1 of the other 3 QFs: 0.125 * 0.875
+            self.assertAlmostEqual(s["challenges"], 0.125 * 0.875,
+                                   places=12)
+
+    def test_optimizer_picks_chalk_under_dominant_ratings(self):
+        ratings = {t: 2000 - 250 * i for i, t in enumerate(self.SEEDS)}
+        draws = [ratings, dict(ratings)]  # zero posterior spread
+        results = optimize_picks(self.SEEDS, {}, draws)
+        best = results[0]
+        self.assertEqual(best["pick"],
+                         (("s1", "s4", "s2", "s3"), ("s1", "s2"), "s1"))
+        # identical draws -> per-draw values identical
+        self.assertAlmostEqual(best["draw_values"][0],
+                               best["draw_values"][1], places=12)
+        self.assertAlmostEqual(
+            best["means"]["challenges"], best["draw_values"][0], places=12)
+
+
+    def test_challenges_ties_broken_by_expected_correct(self):
+        # "challenges" ignores the non-champion-side SF pick (champion
+        # correct already implies >=1 SF correct), so exact twins exist.
+        # The winner among twins must be the one maximizing E[correct].
+        ratings = {t: 2000 - 250 * i for i, t in enumerate(self.SEEDS)}
+        results = optimize_picks(self.SEEDS, {}, [ratings])
+        best = results[0]
+        top = best["means"]["challenges"]
+        for r in results[1:]:
+            if abs(r["means"]["challenges"] - top) < 1e-12:
+                self.assertLessEqual(r["means"]["expected_correct"],
+                                     best["means"]["expected_correct"] + 1e-12)
+
+
+class TestRatingDraws(unittest.TestCase):
+    def test_draws_deterministic_and_spread(self):
+        from posterior import laplace_factor, rating_draws
+        factor = laplace_factor()
+        a = rating_draws(k=3, seed=5, factor=factor)
+        b = rating_draws(k=3, seed=5, factor=factor)
+        self.assertEqual(a, b)
+        self.assertEqual(len(a), 3)
+        for d in a:
+            self.assertTrue(set(STAGE3_TEAMS) <= set(d))
+        spread = max(abs(a[0][t] - a[1][t]) for t in STAGE3_TEAMS)
+        self.assertGreater(spread, 1.0)  # draws actually vary
 
 
 if __name__ == "__main__":

@@ -39,6 +39,13 @@ DATA = Path(__file__).resolve().parent.parent / "data"
 
 GRAND_FINAL_BO5 = True
 
+K_DRAWS = 200
+K_ENVELOPE = 100
+DRAW_SEED = 11
+OBJECTIVE = "challenges"   # set per Will's coin status at lock time:
+                           # challenges | champion | expected_correct | perfect
+LAMBDAS = (0.0, 0.25, 0.5, 0.75, 1.0)
+
 # A finished 16-team Swiss always yields exactly this record multiset.
 RECORD_MULTISET = {(3, 0): 2, (3, 1): 3, (3, 2): 3,
                    (2, 3): 3, (1, 3): 3, (0, 3): 2}
@@ -164,6 +171,92 @@ def load_bracket():
     return playoff_seeds(records, buchholz), "derived from live_state.json"
 
 
+def all_picks(seeds):
+    """All 128 consistent pick brackets: (qf_winners, sf_winners, champion).
+    SF picks must come from your QF winners, champion from your SF picks —
+    the in-client bracket enforces the same consistency."""
+    qfs = quarterfinals(seeds)
+    picks = []
+    for qf_w in itertools.product(*qfs):
+        for sf_w in itertools.product((qf_w[0], qf_w[1]),
+                                      (qf_w[2], qf_w[3])):
+            for champ in sf_w:
+                picks.append((qf_w, sf_w, champ))
+    return picks
+
+
+def score_pick(branches, pick):
+    """All objectives for one pick, exactly, over the outcome branches.
+
+    challenges: P(>=2 QF correct AND >=1 SF correct AND champion correct)
+                — the coin-challenge joint event.
+    A QF/SF pick is correct iff that team wins that match; each team has a
+    fixed bracket path, so set intersection counts per-match agreement."""
+    pq, ps, pc = set(pick[0]), set(pick[1]), pick[2]
+    p_chal = p_champ = p_perfect = e_correct = 0.0
+    for qf_w, sf_w, champ, p in branches:
+        qf_c = len(pq.intersection(qf_w))
+        sf_c = len(ps.intersection(sf_w))
+        ch = champ == pc
+        e_correct += p * (qf_c + sf_c + ch)
+        if ch:
+            p_champ += p
+            if qf_c >= 2 and sf_c >= 1:
+                p_chal += p
+            if qf_c == 4 and sf_c == 2:
+                p_perfect += p
+    return {"challenges": p_chal, "champion": p_champ,
+            "expected_correct": e_correct, "perfect": p_perfect}
+
+
+def optimize_picks(seeds, overrides, draws, objective="challenges",
+                   bo5_final=GRAND_FINAL_BO5):
+    """Rank all picks by posterior-mean objective across rating draws.
+
+    Each draw is scored EXACTLY (128 branches), so across-draw spread is
+    pure parameter uncertainty — no MC noise. Returns a sorted list of
+    {"pick", "means" (all objectives), "draw_values" (ranking objective
+    per draw, paired across picks for margin SEs)}."""
+    picks = all_picks(seeds)
+    sums = [collections.defaultdict(float) for _ in picks]
+    vals = [[] for _ in picks]
+    for ratings in draws:
+        prob = make_prob_fn(ratings, overrides)
+        branches = bracket_distribution(seeds, prob, bo5_final)
+        for i, pick in enumerate(picks):
+            s = score_pick(branches, pick)
+            for key, v in s.items():
+                sums[i][key] += v
+            vals[i].append(s[objective])
+    n = len(draws)
+    results = [{"pick": picks[i],
+                "means": {key: v / n for key, v in sums[i].items()},
+                "draw_values": vals[i]}
+               for i in range(len(picks))]
+    # Exact ties are structural, not numerical: "challenges" never sees the
+    # SF pick on the non-champion side (champion correct already implies
+    # >=1 SF correct), so every pick has a twin differing only there.
+    # Tie-break by the secondary objectives so that slot is still chosen
+    # to maximize what it CAN still win.
+    secondary = [k for k in ("expected_correct", "champion", "perfect")
+                 if k != objective]
+    results.sort(key=lambda r: tuple(-r["means"][k]
+                                     for k in [objective] + secondary))
+    return results
+
+
+def paired_margin(top_vals, runner_vals):
+    """(mean diff, SE of mean diff) for the top pick vs runner-up, paired
+    per draw — the honest 'how decided is this' number."""
+    n = len(top_vals)
+    diffs = [a - b for a, b in zip(top_vals, runner_vals)]
+    mean = sum(diffs) / n
+    if n < 2:
+        return mean, 0.0
+    var = sum((d - mean) ** 2 for d in diffs) / (n - 1)
+    return mean, (var / n) ** 0.5
+
+
 def reach_probs(branches, seeds):
     reach = {t: {"sf": 0.0, "final": 0.0, "champ": 0.0} for t in seeds}
     for qf_w, sf_w, champ, p in branches:
@@ -197,6 +290,63 @@ def main():
     for t in sorted(seeds, key=lambda t: -reach[t]["champ"]):
         r = reach[t]
         print(f"{t:12s} {r['sf']:9.3f} {r['final']:9.3f} {r['champ']:9.3f}")
+
+    # Posterior-predictive pick optimization: rank picks by E[objective]
+    # over Laplace rating draws, not the MAP point — knife-edge picks
+    # (the 0.003-0.007 margins) are exactly where this differs.
+    from posterior import laplace_factor, rating_draws
+    print(f"\nDrawing {K_DRAWS} rating vectors from the Laplace posterior...")
+    factor = laplace_factor()
+    draws = rating_draws(k=K_DRAWS, seed=DRAW_SEED, factor=factor)
+    results = optimize_picks(seeds, overrides, draws, OBJECTIVE)
+
+    map_branches = branches  # MAP = the fitted-ratings table above
+    print(f"\nTop picks by posterior-mean P({OBJECTIVE}) "
+          f"({K_DRAWS} draws, exact per draw):")
+    print(f"{'#':>2s} {'champion':12s} {'finalists':24s} "
+          f"{'E[P]':>7s} {'5-95%':>15s} {'MAP':>7s}")
+    for rank, r in enumerate(results[:5], 1):
+        qf_w, sf_w, champ = r["pick"]
+        xs = sorted(r["draw_values"])
+        lo = xs[min(int(0.05 * len(xs)), len(xs) - 1)]
+        hi = xs[min(int(0.95 * len(xs)), len(xs) - 1)]
+        map_v = score_pick(map_branches, r["pick"])[OBJECTIVE]
+        print(f"{rank:2d} {champ:12s} {' + '.join(sf_w):24s} "
+              f"{r['means'][OBJECTIVE]:7.3f} [{lo:.3f}-{hi:.3f}] {map_v:7.3f}")
+        if rank == 1:
+            print(f"   QF picks: {', '.join(qf_w)}")
+
+    # Margin vs the best pick with a DIFFERENT primary value — exact ties
+    # (the free non-champion-side SF slot) are resolved by tie-break, not
+    # by evidence, and would report a meaningless 0.0 margin.
+    top_mean = results[0]["means"][OBJECTIVE]
+    j = next((i for i in range(1, len(results))
+              if abs(results[i]["means"][OBJECTIVE] - top_mean) > 1e-12),
+             1)
+    if j > 1:
+        print(f"\n({j} picks tied on P({OBJECTIVE}) — the non-champion-side "
+              f"SF slot is free under this objective; tie-broken by "
+              f"E[correct], then P(champion).)")
+    mean_d, se_d = paired_margin(results[0]["draw_values"],
+                                 results[j]["draw_values"])
+    decided = "decided" if mean_d > 2 * se_d else "KNIFE-EDGE"
+    print(f"Margin #1 over first non-tied rival (#{j + 1}): "
+          f"{mean_d:+.4f} +/- {se_d:.4f} (paired SE) -> {decided}")
+    m = results[0]["means"]
+    print(f"Top pick, all objectives: P(challenges)={m['challenges']:.3f}  "
+          f"P(champion)={m['champion']:.3f}  E[correct]={m['expected_correct']:.2f}  "
+          f"P(perfect)={m['perfect']:.4f}")
+
+    # Structural envelope: does the best pick survive the lambda sweep?
+    print(f"\nLambda envelope (top pick per anchor-propagation weight, "
+          f"{K_ENVELOPE} draws each):")
+    base_pick = results[0]["pick"]
+    for lam in LAMBDAS:
+        d = rating_draws(k=K_ENVELOPE, seed=DRAW_SEED, lam=lam, factor=factor)
+        r = optimize_picks(seeds, overrides, d, OBJECTIVE)[0]
+        flag = "" if r["pick"] == base_pick else "  <- PICK CHANGES"
+        print(f"  lam={lam:.2f}: champ {r['pick'][2]:12s} "
+              f"E[P]={r['means'][OBJECTIVE]:.3f}{flag}")
 
 
 if __name__ == "__main__":
