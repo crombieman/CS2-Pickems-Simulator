@@ -1,0 +1,29 @@
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Invariant + regression tests
+        run: python -m unittest discover -s src -p "test_*.py" -v
+      - name: Pipeline reproducibility (fit must re-derive committed ratings)
+        run: |
+          python src/fit.py
+          git diff --exit-code data/ratings_fitted.json

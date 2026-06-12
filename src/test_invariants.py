@@ -12,7 +12,8 @@ import unittest
 from pathlib import Path
 
 from model import (STAGE3_TEAMS, load_pair_overrides, win_prob)
-from simulate import PAIR_OVERRIDES, ROUND1, match_prob, run, simulate_stage
+from simulate import (PAIR_OVERRIDES, ROUND1, _pair_group, make_state,
+                      match_prob, run, simulate_stage)
 
 DATA = Path(__file__).resolve().parent.parent / "data"
 
@@ -61,6 +62,66 @@ class TestOverrides(unittest.TestCase):
                 seen.add(t)
 
 
+class TestPriorityTable6(unittest.TestCase):
+    """Valve's 15-row table for 6-team groups (R4/R5)."""
+
+    GROUP = ["Vitality", "NAVI", "Falcons", "MongolZ", "Aurora", "FURIA"]
+    BUCH = {t: 0 for t in GROUP}  # equal Buchholz -> order = initial seed
+
+    def test_no_rematches_uses_priority_1(self):
+        played = {t: set() for t in self.GROUP}
+        pairs = _pair_group(self.GROUP, played, self.BUCH)
+        # priority 1: 1v6, 2v5, 3v4 in seed order
+        self.assertEqual(pairs, [("Vitality", "FURIA"), ("NAVI", "Aurora"),
+                                 ("Falcons", "MongolZ")])
+
+    def test_rematch_skips_to_next_row(self):
+        played = {t: set() for t in self.GROUP}
+        # block 1v6 (Vitality-FURIA): rows 1-6 all pair... rows starting
+        # (1,6): rows 1,2 and 7. Row 3 is 1v5,2v6,3v4.
+        played["Vitality"].add("FURIA")
+        played["FURIA"].add("Vitality")
+        pairs = _pair_group(self.GROUP, played, self.BUCH)
+        self.assertEqual(pairs, [("Vitality", "Aurora"), ("NAVI", "FURIA"),
+                                 ("Falcons", "MongolZ")])
+
+    def test_diverges_from_greedy_on_fallback(self):
+        """The case that motivated the table: greedy backtracking and the
+        rulebook can disagree when constraints bind. Block 1v6 AND 1v5:
+        table row 5 gives 1v4, 2v6, 3v5; greedy would also try 1v4 but
+        then pairs 2v6? — assert the table's exact output regardless."""
+        played = {t: set() for t in self.GROUP}
+        for a, b in (("Vitality", "FURIA"), ("Vitality", "Aurora")):
+            played[a].add(b)
+            played[b].add(a)
+        pairs = _pair_group(self.GROUP, played, self.BUCH)
+        self.assertEqual(pairs, [("Vitality", "MongolZ"), ("NAVI", "FURIA"),
+                                 ("Falcons", "Aurora")])
+
+
+class TestMakeStateValidation(unittest.TestCase):
+    def test_unknown_team_rejected(self):
+        with self.assertRaises(ValueError) as cm:
+            make_state([("Vitality", "Mongolz")])  # wrong capitalization
+        self.assertIn("unknown team", str(cm.exception))
+
+    def test_duplicate_pairing_rejected(self):
+        with self.assertRaises(ValueError) as cm:
+            make_state([("Vitality", "FUT"), ("FUT", "Vitality")])
+        self.assertIn("twice", str(cm.exception))
+
+    def test_impossible_record_rejected(self):
+        bad = [("Vitality", "FUT"), ("Vitality", "G2"),
+               ("Vitality", "B8"), ("Vitality", "Monte")]  # 4 wins
+        with self.assertRaises(ValueError) as cm:
+            make_state(bad, [("NAVI", "Spirit")])
+        self.assertIn("impossible", str(cm.exception))
+
+    def test_midround_without_upcoming_rejected(self):
+        with self.assertRaises(AssertionError):
+            make_state([("Vitality", "FUT")])  # 14 teams at 0 games
+
+
 class TestLockedRegression(unittest.TestCase):
     """The committed stage3_probs.json (v3 lock) must reproduce exactly.
 
@@ -73,13 +134,14 @@ class TestLockedRegression(unittest.TestCase):
         import simulate
         ratings = json.load(open(DATA / "ratings_fitted.json"))
         locked = json.load(open(DATA / "stage3_probs.json"))
-        orig = simulate.SEED
+        orig_seed, orig_table = simulate.SEED, simulate.USE_PRIORITY_TABLE
         simulate.SEED = simulate.LEGACY_SEED
+        simulate.USE_PRIORITY_TABLE = False  # locked tables predate the table
         try:
             _, stats = run(ratings, n_sims=locked["meta"]["n_sims"],
                            seed=locked["meta"]["seed"])
         finally:
-            simulate.SEED = orig
+            simulate.SEED, simulate.USE_PRIORITY_TABLE = orig_seed, orig_table
         for t, want in locked["probs"].items():
             for k, v in want.items():
                 self.assertAlmostEqual(stats[t][k], v, places=9,

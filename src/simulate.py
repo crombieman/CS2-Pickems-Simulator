@@ -55,11 +55,40 @@ SEED = {
 LEGACY_SEED = {t: i for i, t in enumerate(STAGE3_TEAMS)}
 
 
+# Valve Major Supplemental Rulebook: 6-team record groups (R4 2-1/1-2,
+# R5 2-2... when applicable) pick the TOP-MOST priority row that avoids a
+# rematch. Positions are 1-indexed into the group sorted by current seed.
+PRIORITY_TABLE_6 = [
+    ((1, 6), (2, 5), (3, 4)), ((1, 6), (2, 4), (3, 5)),
+    ((1, 5), (2, 6), (3, 4)), ((1, 5), (2, 4), (3, 6)),
+    ((1, 4), (2, 6), (3, 5)), ((1, 4), (2, 5), (3, 6)),
+    ((1, 6), (2, 3), (4, 5)), ((1, 5), (2, 3), (4, 6)),
+    ((1, 3), (2, 6), (4, 5)), ((1, 3), (2, 5), (4, 6)),
+    ((1, 4), (2, 3), (5, 6)), ((1, 3), (2, 4), (5, 6)),
+    ((1, 2), (3, 6), (4, 5)), ((1, 2), (3, 5), (4, 6)),
+    ((1, 2), (3, 4), (5, 6)),
+]
+
+# Pin to False to reproduce sims generated before the table existed
+# (the locked v1-v3 tables used greedy pairing for all group sizes).
+USE_PRIORITY_TABLE = True
+
+
 def _pair_group(group, played, buchholz):
-    """Pair one record group: sort by (Buchholz desc, seed asc), match top
-    vs bottom, avoid rematches, backtrack if stuck (allow rematch as last
-    resort, mirroring Valve's fallback)."""
+    """Pair one record group, sorted by (Buchholz desc, seed asc).
+
+    6-team groups use Valve's explicit 15-row priority table (first row
+    with no rematch). Other sizes use highest-vs-lowest with rematch
+    avoidance via backtracking (the rulebook's R2/R3 rule; allow rematch
+    as last resort, mirroring Valve's fallback)."""
     ordered = sorted(group, key=lambda t: (-buchholz[t], SEED[t]))
+
+    if USE_PRIORITY_TABLE and len(ordered) == 6:
+        for row in PRIORITY_TABLE_6:
+            if all(ordered[j - 1] not in played[ordered[i - 1]]
+                   for i, j in row):
+                return [(ordered[i - 1], ordered[j - 1]) for i, j in row]
+        # all 15 rows blocked (needs 5+ rematch constraints) — fall through
 
     def backtrack(remaining):
         if not remaining:
@@ -86,6 +115,25 @@ def make_state(completed, upcoming=()):
       Valve's exact seeding-difference pairing can differ from our greedy
       approximation, so real pairings always beat simulated ones).
     """
+    # live_state.json is hand-edited — validate at the boundary, fail loud
+    # and friendly rather than producing silently-wrong probabilities.
+    known = set(STAGE3_TEAMS)
+    for src_name, matches_in in (("completed", completed), ("upcoming", upcoming)):
+        for m in matches_in:
+            if len(tuple(m)) != 2:
+                raise ValueError(f"{src_name}: each entry needs exactly 2 teams, got {m!r}")
+            for t in m:
+                if t not in known:
+                    raise ValueError(
+                        f"{src_name}: unknown team {t!r} — check spelling against "
+                        f"model.STAGE3_TEAMS (e.g. 'MongolZ', 'NAVI', '9z')")
+    pair_seen = collections.Counter(frozenset(m) for m in completed)
+    pair_seen.update(frozenset(m) for m in upcoming)
+    dupes = [set(p) for p, n in pair_seen.items() if n > 1]
+    if dupes:
+        raise ValueError(f"same pairing listed twice (rematches don't happen "
+                         f"mid-Swiss): {dupes}")
+
     wins = collections.Counter()
     losses = collections.Counter()
     played = {t: set() for t in STAGE3_TEAMS}
@@ -97,6 +145,11 @@ def make_state(completed, upcoming=()):
         played[l].add(w)
         opponents[w].append(l)
         opponents[l].append(w)
+    for t in STAGE3_TEAMS:
+        if wins[t] > 3 or losses[t] > 3:
+            raise ValueError(f"{t} has {wins[t]}-{losses[t]} — impossible in a "
+                             f"best-of-3-wins Swiss; check 'completed' for errors "
+                             f"(winner goes FIRST in each pair)")
     if not upcoming:
         # Without forced pairings we can only pair by record group, which
         # is wrong mid-round (a 1-0 team awaiting its R2 game would be
