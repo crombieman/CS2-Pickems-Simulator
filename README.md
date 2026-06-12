@@ -15,7 +15,29 @@ python src/optimize.py   # 40k Swiss sims -> per-team probs + optimal slate
                          #    pre-registered stage3_probs.json is never rewritten)
 python src/playoffs.py   # top-8 bracket: exact 128-branch enumeration +
                          #   posterior-predictive pick optimizer (see below)
+
+# During the stage (daily driver):
+python src/live.py       # re-forecast from data/live_state.json: live
+                         #   P(pass), per-team probs, rooting guide; appends
+                         #   to data/calibration_log.jsonl (--locked = frozen
+                         #   v3 ratings instead of the living fit)
+python src/fetch_anchors.py --live-anchors     # Polymarket lines -> archive
+                         #   (+ --playoff-anchors on lock day); also runs as
+                         #   a GitHub Actions cron every 2h during events
+python src/sensitivity.py                      # pre-lock: which lines/knobs
+                         #   move the picks
+python src/posterior.py                        # honest intervals: Laplace
+                         #   posterior over ratings
+
+# After the stage:
+python src/postmortem.py          # per-team Brier, v1/v2/v3 + slate ticks
+python src/postmortem_matches.py  # per-match: frozen v3 lock vs market
+                                  #   closing line (pre-registered 06-12)
 ```
+
+CI runs the test suite (`src/test_*.py`, stdlib unittest) plus a
+fit-reproducibility gate (CSV -> ratings_fitted.json must match the
+committed file) on every push.
 
 ### Playoffs (`playoffs.py`)
 
@@ -74,12 +96,14 @@ belong in advance slots rather than 3-0 slots.
 
 ## Data provenance (as committed)
 
-- `matches_2026.csv`: 92 verified series — complete Cologne Stage 2,
+- `matches_2026.csv`: 107 verified series — complete Cologne Stage 2,
   IEM Rio 2026, plus confirmed results from IEM Atlanta, EPL S23,
   PGL Astana (full Stage-3-team coverage added in v2 refresh), CS Asia
   Championships, IEM Kraków, BLAST Bounty/Rotterdam/Spring, PGL
-  Bucharest. v2+ additions cross-verified against 2+ independent pages
-  (contradictory-source series discarded rather than guessed).
+  Bucharest, and Cologne Stage 3 itself (rounds ingested as played,
+  weight 1.0, two-source verified). v2+ additions cross-verified
+  against 2+ independent pages (contradictory-source series discarded
+  rather than guessed).
 - Integrity audit (2026-06-11, pre-stage): all weight >= 0.85 rows and
   all Cologne Stage 2 rows re-verified against event + team pages.
   Found and fixed: 1 swapped result (TYLOO beat Astralis, Cologne S2
@@ -140,10 +164,14 @@ seed 11). Superseded tables: `data/stage3_probs_locked_v1.json`,
   note: v1's argmax preferred FURIA 3-0 over Falcons at Δ P(≥5) ≈ +0.002;
   the v1 lock was a manual tie-break toward E[ticks] (4.13 vs 4.10).
 
-Log these against actuals: per-team Brier on (p30, padv, p03) for both
-v1 and v2 (`src/postmortem.py` grades both) is the postmortem that
-matters — including whether the refresh helped — not whether the slate
-passed.
+Log these against actuals: per-team Brier on (p30, padv, p03) for all
+three locked tables (`src/postmortem.py` grades v1/v2/v3) is the
+postmortem that matters — including whether the refresh helped — not
+whether the slate passed. `src/postmortem_matches.py` (grading rule
+pre-registered 2026-06-12, mid-stage) runs the stronger per-match test:
+the frozen v3 lock vs the market closing line, Brier + log score. Every
+mid-stage re-forecast is captured in `data/calibration_log.jsonl` for
+the same after-the-fact grading.
 
 ## Known limitations
 
@@ -151,13 +179,15 @@ passed.
   highest-vs-lowest rule + corrected initial seeds reproduce the
   announced R2 pairings 8/8 (the original seed-order guess got 1/8 —
   seeds, not the algorithm, were the error; measured slate impact of
-  that error was only ~0.008 P(>=5)). Remaining gap: Valve's 15-row
-  matchup priority table for 6-team groups (R4) vs our greedy
-  backtracking — equivalent when no rematch constraint binds, may
-  diverge on fallbacks.
+  that error was only ~0.008 P(>=5)). Valve's 15-row matchup priority
+  table for 6-team groups (R4) is implemented exactly, with tests.
 - Scalar ratings assume transitivity — no map-pool intersection, veto
   modeling, or head-to-head style effects (e.g. donk vs NAVI).
-- Static ratings within the stage; no round-to-round form updating.
+- The frozen lock model is static within the stage (no form updating);
+  since 2026-06-12 this is measurable, not just disclaimed — the
+  per-match postmortem grades the lock's R2+ foresight against closing
+  lines, and live.py's living-fit default re-fits on stage results as
+  they're ingested.
 - BO3s drawn as single Bernoulli events rather than map-level sequences.
 - Roster changes are invisible to team-level fitting; only the market
   layer can price them. Known at v2 lock: Brollan's last event with MOUZ,
@@ -178,7 +208,10 @@ passed.
   vectors) + team/IGL term, with market lines as the prior. Solves the
   roster-change blind spot and adds map-level granularity for veto
   modeling. Mind role confounds (entry vs AWP stat baselines).
-- Re-fit between Swiss rounds: R2+ match markets go live during the
-  stage, and mid-stage map data covers all 16 teams.
-- Track calibration: log every published probability, Brier-score after
-  each event.
+- ~~Re-fit between Swiss rounds~~ shipped 2026-06-12: stage results are
+  ingested as played and live.py defaults to the living fit (R2+ match
+  markets already feed live_anchors).
+- ~~Track calibration: log every published probability~~ shipped
+  2026-06-12: `data/calibration_log.jsonl` (every live.py run) +
+  `data/odds_archive.jsonl` (2h market snapshots) + frozen lock tables;
+  Brier-scoring after each event via the two postmortem tools.
