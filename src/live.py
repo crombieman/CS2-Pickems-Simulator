@@ -17,11 +17,25 @@ Usage during the stage:
 Outputs: updated per-team (p30 / padv / p03), the locked v3 slate's live
 P(>=5 correct) and E[ticks], and per upcoming match P(pass | A wins) vs
 P(pass | B wins) — who to root for, quantified.
+
+Ratings: data/ratings_fitted.json by default — the LIVING file, which
+re-fits as the dataset grows (since 2026-06-12 that includes Stage 3
+results, i.e. the rooting guide is mid-stage-refit). --locked runs on
+the frozen v3 lock ratings instead (the pre-registered model's view).
+The source + content hash go into every calibration-log entry, so model
+breaks in the P(pass) time series are visible, never silent.
+
+Every run APPENDS its published numbers to data/calibration_log.jsonl —
+the forward-capture calibration log (README promise since v1): published
+forecasts are unrecoverable later, exactly like odds.
 """
 
+import argparse
 import collections
+import hashlib
 import json
 import random
+from datetime import datetime, timezone
 from pathlib import Path
 
 import simulate
@@ -66,16 +80,46 @@ def run_from(ratings, state, n_sims=N_SIMS, seed=SEED):
     return passes / n_sims, total / n_sims, stats
 
 
+def build_log_entry(ts, ratings_source, ratings_sha, n_anchors, completed,
+                    upcoming, p_pass, e_ticks, stats, rooting):
+    """One calibration-log record: everything published by this run, as
+    plain JSON. rooting rows arrive as (swing, a, b, p_pass_a, p_pass_b)."""
+    return {
+        "ts": ts,
+        "ratings_source": ratings_source,
+        "ratings_sha": ratings_sha,
+        "n_anchors": n_anchors,
+        "n_completed": len(completed),
+        "upcoming": [list(m) for m in upcoming],
+        "p_pass": p_pass,
+        "e_ticks": e_ticks,
+        "teams": stats,
+        "rooting": [{"a": a, "b": b, "p_pass_a": pa, "p_pass_b": pb,
+                     "swing": swing}
+                    for swing, a, b, pa, pb in rooting],
+    }
+
+
 def main():
-    ratings = json.load(open(DATA / "ratings_fitted.json"))
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--locked", action="store_true",
+                    help="use frozen v3 lock ratings instead of the living fit")
+    args = ap.parse_args()
+
+    ratings_file = ("ratings_locked_v3.json" if args.locked
+                    else "ratings_fitted.json")
+    raw = (DATA / ratings_file).read_bytes()
+    ratings_sha = hashlib.sha1(raw).hexdigest()[:12]
+    ratings = json.loads(raw)
+    print(f"Ratings: {ratings_file} ({ratings_sha})")
     live = json.load(open(DATA / "live_state.json"))
     completed = [tuple(m) for m in live.get("completed", [])]
     upcoming = [tuple(m) for m in live.get("upcoming", [])]
 
     # Optional mid-stage market lines for upcoming pairings.
     live_anchors_path = DATA / "live_anchors.json"
+    n_loaded = 0
     if live_anchors_path.exists():
-        n_loaded = 0
         for anc in json.load(open(live_anchors_path))["anchors"]:
             simulate.PAIR_OVERRIDES[(anc["a"], anc["b"])] = anc["p"]
             simulate.PAIR_OVERRIDES[(anc["b"], anc["a"])] = 1.0 - anc["p"]
@@ -98,10 +142,10 @@ def main():
     print(f"\nLocked v3 slate live:  P(>=5 correct) = {p5:.3f}   "
           f"E[ticks] = {ev:.2f}")
 
+    rows = []
     if upcoming:
         print(f"\nRooting guide (locked slate, {N_SIMS} sims per branch):")
         print(f"{'Match':28s} {'P(pass|A)':>10s} {'P(pass|B)':>10s} {'root for':>12s} {'swing':>7s}")
-        rows = []
         for i, (a, b) in enumerate(upcoming):
             rest = [m for j, m in enumerate(upcoming) if j != i]
             pa, _, _ = run_from(ratings, make_state(completed + [(a, b)], rest))
@@ -110,6 +154,15 @@ def main():
         for swing, a, b, pa, pb in sorted(rows, reverse=True):
             fav = a if pa >= pb else b
             print(f"{a} vs {b:14s} {pa:10.3f} {pb:10.3f} {fav:>12s} {swing:7.3f}")
+
+    entry = build_log_entry(
+        ts=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        ratings_source=ratings_file, ratings_sha=ratings_sha,
+        n_anchors=n_loaded, completed=completed, upcoming=upcoming,
+        p_pass=p5, e_ticks=ev, stats=stats, rooting=sorted(rows, reverse=True))
+    with open(DATA / "calibration_log.jsonl", "a") as f:
+        f.write(json.dumps(entry) + "\n")
+    print(f"\nLogged -> data/calibration_log.jsonl")
 
 
 if __name__ == "__main__":
