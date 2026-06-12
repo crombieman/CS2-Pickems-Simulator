@@ -70,13 +70,16 @@ def main():
     ratings = json.load(open(DATA / "ratings_fitted.json"))
     sims, stats = run(ratings, n_sims=N_SIMS, seed=SIM_SEED)
 
-    # Persist the probability table — this is what the postmortem grades.
+    # stage3_probs.json is the FROZEN pre-registered forecast (postmortem
+    # grades it; the regression test pins it) — never rewrite it. The
+    # living pipeline (current ratings + corrected seeds + priority table)
+    # writes alongside it instead.
     out = {
         "meta": {"n_sims": N_SIMS, "seed": SIM_SEED,
                  "generated": datetime.date.today().isoformat()},
         "probs": stats,
     }
-    json.dump(out, open(DATA / "stage3_probs.json", "w"), indent=2)
+    json.dump(out, open(DATA / "stage3_probs_live.json", "w"), indent=2)
 
     print(f"{'Team':12s} {'P(3-0)':>7s} {'P(3-1/3-2)':>11s} {'P(advance)':>11s} {'P(0-3)':>7s}")
     for t in sorted(STAGE3_TEAMS, key=lambda t: -stats[t]["pany"]):

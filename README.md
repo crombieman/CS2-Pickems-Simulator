@@ -11,7 +11,26 @@ Pure stdlib Python, no dependencies.
 ```bash
 python src/fit.py        # fit ratings from data -> data/ratings_fitted.json
 python src/optimize.py   # 40k Swiss sims -> per-team probs + optimal slate
+                         #   (writes data/stage3_probs_live.json; the frozen
+                         #    pre-registered stage3_probs.json is never rewritten)
+python src/playoffs.py   # top-8 bracket: exact 128-branch enumeration +
+                         #   posterior-predictive pick optimizer (see below)
 ```
+
+### Playoffs (`playoffs.py`)
+
+Seeds 1-8 from final Stage 3 standings (W-L → Buchholz → initial seed),
+rulebook bracket (1v8 + 4v5 over 2v7 + 3v6), BO3 with a BO5 grand final
+(converted via the implied map prob, since ratings are BO3-calibrated).
+The 8-team bracket has only 128 outcomes, so every pick is scored
+**exactly** — no Monte Carlo at the decision layer. Picks are ranked by
+the posterior mean of P(≥2 QF ∧ ≥1 SF ∧ champion correct) across 200
+Laplace rating draws, so rating uncertainty is priced into the choice
+(knife-edge picks get margin ± paired-SE reporting plus a lambda
+sensitivity sweep). Bracket source: `data/playoff_bracket.json`
+(announced, wins) or derived from a complete `data/live_state.json`;
+QF market lines go in `data/playoff_anchors.json` — Stage 3 anchors are
+deliberately NOT reused (stale by playoffs).
 
 ## Methodology
 
