@@ -132,7 +132,10 @@ class TestLockedRegression(unittest.TestCase):
 
     def test_probs_reproduce(self):
         import simulate
-        ratings = json.load(open(DATA / "ratings_fitted.json"))
+        # ratings_locked_v3.json is the frozen INPUT that generated the
+        # locked probs; ratings_fitted.json is the living pipeline output
+        # and moves with the dataset (post-audit). Never conflate them.
+        ratings = json.load(open(DATA / "ratings_locked_v3.json"))
         locked = json.load(open(DATA / "stage3_probs.json"))
         orig_seed, orig_table = simulate.SEED, simulate.USE_PRIORITY_TABLE
         simulate.SEED = simulate.LEGACY_SEED
