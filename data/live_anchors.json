@@ -1,12 +1,61 @@
 {
-  "comment": "Polymarket gamma mids, fetched 2026-06-12T23:53:40+00:00; normalized two-sided; consumed by live.py as pair overrides.",
+  "comment": "Polymarket gamma mids, fetched 2026-06-13T04:53:10+00:00; normalized two-sided; consumed by live.py as pair overrides.",
   "anchors": [
     {
       "a": "NAVI",
       "b": "MongolZ",
       "p": 0.705,
       "slug": "cs2-navi-mglz-2026-06-13",
-      "volume": 60437
+      "volume": 132728
+    },
+    {
+      "a": "Vitality",
+      "b": "MOUZ",
+      "p": 0.785,
+      "slug": "cs2-vit-mouz-2026-06-13",
+      "volume": 95374
+    },
+    {
+      "a": "Aurora",
+      "b": "G2",
+      "p": 0.425,
+      "slug": "cs2-aur1-g2-2026-06-13",
+      "volume": 91578
+    },
+    {
+      "a": "B8",
+      "b": "FUT",
+      "p": 0.265,
+      "slug": "cs2-b8-fut-2026-06-13",
+      "volume": 61608
+    },
+    {
+      "a": "BetBoom",
+      "b": "FURIA",
+      "p": 0.385,
+      "slug": "cs2-bb3-furia-2026-06-13",
+      "volume": 56496
+    },
+    {
+      "a": "Spirit",
+      "b": "9z",
+      "p": 0.875,
+      "slug": "cs2-ts7-9z-2026-06-13",
+      "volume": 47442
+    },
+    {
+      "a": "PARIVISION",
+      "b": "Legacy",
+      "p": 0.395,
+      "slug": "cs2-prv-lgc-2026-06-13",
+      "volume": 26685
+    },
+    {
+      "a": "Falcons",
+      "b": "Monte",
+      "p": 0.785,
+      "slug": "cs2-fal2-mnte-2026-06-13",
+      "volume": 20649
     }
   ]
 }
