@@ -23,6 +23,7 @@
     {"a": "Aurora", "b": "G2", "winner": "Aurora", "start": "2026-06-13T12:20:00+00:00", "round": "R3"},
     {"a": "Vitality", "b": "MOUZ", "winner": "Vitality", "start": "2026-06-13T14:35:00+00:00", "round": "R3"},
     {"a": "PARIVISION", "b": "Legacy", "winner": "Legacy", "start": "2026-06-13T15:45:00+00:00", "round": "R3"},
-    {"a": "BetBoom", "b": "FURIA", "winner": "FURIA", "start": "2026-06-13T17:40:00+00:00", "round": "R3"}
+    {"a": "BetBoom", "b": "FURIA", "winner": "FURIA", "start": "2026-06-13T17:40:00+00:00", "round": "R3"},
+    {"a": "Spirit", "b": "9z", "winner": "Spirit", "start": "2026-06-13T18:55:00+00:00", "round": "R3"}
   ]
 }
