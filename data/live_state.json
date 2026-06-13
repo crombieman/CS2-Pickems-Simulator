@@ -63,16 +63,10 @@
     [
       "Spirit",
       "Aurora"
-    ]
-  ],
-  "upcoming": [
-    [
-      "Spirit",
-      "9z"
     ],
     [
-      "BetBoom",
-      "FURIA"
+      "FURIA",
+      "BetBoom"
     ],
     [
       "NAVI",
@@ -91,12 +85,18 @@
       "MOUZ"
     ],
     [
-      "B8",
-      "FUT"
+      "FUT",
+      "B8"
     ],
     [
-      "PARIVISION",
-      "Legacy"
+      "Legacy",
+      "PARIVISION"
+    ]
+  ],
+  "upcoming": [
+    [
+      "Spirit",
+      "9z"
     ]
   ]
 }

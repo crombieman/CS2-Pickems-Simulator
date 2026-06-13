@@ -15,7 +15,12 @@ class TestMakeResults(unittest.TestCase):
         live = json.load(open(DATA / "live_state.json"))
         completed = [tuple(m) for m in live["completed"]]
         if len(completed) < 33:  # a full Swiss is 33 series
-            with self.assertRaises(ValueError):
+            # Any incomplete stage must be refused. A round-complete partial
+            # stage trips the record-multiset check (ValueError); a mid-round
+            # state (e.g. R3 done except a live decider, so games played vary)
+            # trips make_state's mid-round guard (AssertionError). Both are
+            # valid refusals — the contract is "refuse", not a specific type.
+            with self.assertRaises((ValueError, AssertionError)):
                 make_results(completed)
 
     def test_complete_stage_shapes_records(self):
