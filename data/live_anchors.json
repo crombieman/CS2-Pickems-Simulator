@@ -1,12 +1,4 @@
 {
-  "comment": "Polymarket gamma mids, fetched 2026-06-14T19:59:32+00:00; normalized two-sided; consumed by live.py as pair overrides.",
-  "anchors": [
-    {
-      "a": "NAVI",
-      "b": "Falcons",
-      "p": 0.365,
-      "slug": "cs2-navi-fal2-2026-06-14",
-      "volume": 1572958
-    }
-  ]
+  "comment": "Polymarket gamma mids, fetched 2026-06-14T21:42:07+00:00; normalized two-sided; consumed by live.py as pair overrides.",
+  "anchors": []
 }
