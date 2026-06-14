@@ -1,4 +1,12 @@
 {
-  "comment": "Polymarket gamma mids, fetched 2026-06-14T21:42:07+00:00; normalized two-sided; consumed by live.py as pair overrides.",
-  "anchors": []
+  "comment": "Polymarket gamma mids, fetched 2026-06-14T23:38:24+00:00; normalized two-sided; consumed by live.py as pair overrides.",
+  "anchors": [
+    {
+      "a": "9z",
+      "b": "MongolZ",
+      "p": 0.405,
+      "slug": "cs2-9z-mglz-2026-06-15",
+      "volume": 22153
+    }
+  ]
 }
