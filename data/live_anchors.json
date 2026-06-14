@@ -1,40 +1,47 @@
 {
-  "comment": "Polymarket gamma mids, fetched 2026-06-14T05:10:20+00:00; normalized two-sided; consumed by live.py as pair overrides.",
+  "comment": "Polymarket gamma mids, fetched 2026-06-14T09:57:06+00:00; normalized two-sided; consumed by live.py as pair overrides.",
   "anchors": [
     {
       "a": "MOUZ",
       "b": "FUT",
-      "p": 0.555,
+      "p": 0.575,
       "slug": "cs2-mouz-fut-2026-06-14",
-      "volume": 75379
-    },
-    {
-      "a": "Aurora",
-      "b": "9z",
-      "p": 0.495,
-      "slug": "cs2-aur1-9z-2026-06-14",
-      "volume": 59329
-    },
-    {
-      "a": "BetBoom",
-      "b": "Vitality",
-      "p": 0.19,
-      "slug": "cs2-bb3-vit-2026-06-14",
-      "volume": 49796
+      "volume": 189184
     },
     {
       "a": "MongolZ",
       "b": "Monte",
-      "p": 0.665,
+      "p": 0.655,
       "slug": "cs2-mglz-mnte-2026-06-14",
-      "volume": 38619
+      "volume": 178700
+    },
+    {
+      "a": "Aurora",
+      "b": "9z",
+      "p": 0.505,
+      "slug": "cs2-aur1-9z-2026-06-14",
+      "volume": 172518
     },
     {
       "a": "NAVI",
       "b": "Falcons",
       "p": 0.575,
       "slug": "cs2-navi-fal2-2026-06-14",
-      "volume": 31591
+      "volume": 94332
+    },
+    {
+      "a": "BetBoom",
+      "b": "Vitality",
+      "p": 0.185,
+      "slug": "cs2-bb3-vit-2026-06-14",
+      "volume": 72429
+    },
+    {
+      "a": "G2",
+      "b": "Legacy",
+      "p": 0.605,
+      "slug": "cs2-g2-lgc-2026-06-14",
+      "volume": 43588
     }
   ]
 }
