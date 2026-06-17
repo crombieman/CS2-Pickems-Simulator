@@ -39,6 +39,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import simulate
+from calibration import _git_sha, _sha, _src_dirty
 from model import STAGE3_TEAMS
 from simulate import make_state, simulate_stage
 
@@ -81,9 +82,14 @@ def run_from(ratings, state, n_sims=N_SIMS, seed=SEED):
 
 
 def build_log_entry(ts, ratings_source, ratings_sha, n_anchors, completed,
-                    upcoming, p_pass, e_ticks, stats, rooting):
+                    upcoming, p_pass, e_ticks, stats, rooting,
+                    manifest=None, match_forecasts=None):
     """One calibration-log record: everything published by this run, as
-    plain JSON. rooting rows arrive as (swing, a, b, p_pass_a, p_pass_b)."""
+    plain JSON. rooting rows arrive as (swing, a, b, p_pass_a, p_pass_b).
+
+    manifest + match_forecasts (W2b) make a forward forecast replayable and
+    thus adoption-eligible once graded (DoR §2.3). They default to None for
+    backward compatibility; main() always supplies them on a live run."""
     return {
         "ts": ts,
         "ratings_source": ratings_source,
@@ -97,6 +103,47 @@ def build_log_entry(ts, ratings_source, ratings_sha, n_anchors, completed,
         "rooting": [{"a": a, "b": b, "p_pass_a": pa, "p_pass_b": pb,
                      "swing": swing}
                     for swing, a, b, pa, pb in rooting],
+        "manifest": manifest,
+        "match_forecasts": match_forecasts,
+    }
+
+
+def per_match_forecasts(ratings, upcoming):
+    """Immutable per-match model probs for the announced pairings — the
+    strongest pre-registration of a forward forecast (replayable even if the
+    input files later change). model_prob = what the model plays (the market
+    override if the pair is priced, else the rating-implied prob); market_prob =
+    the line used at lock, or None if unpriced."""
+    rows = []
+    for a, b in upcoming:
+        override = simulate.PAIR_OVERRIDES.get((a, b))
+        rows.append({"a": a, "b": b,
+                     "model_prob": simulate.match_prob(ratings, a, b),
+                     "market_prob": override})
+    return rows
+
+
+def forecast_manifest(ratings_source, ratings_sha, anchors_source, anchors_sha):
+    """Replay manifest (DoR §2.3): names + hashes every input needed to
+    reproduce the per-match probabilities, plus a code-dirty marker. The grader
+    treats a row as adoption-eligible only if this is present and not dirty.
+    event_config_sha is 'pending-w5' until the event-config refactor (W5) gives
+    events a config hash."""
+    return {
+        "manifest_version": "v1",
+        "code_sha": _git_sha(),
+        "code_dirty": _src_dirty(),
+        "ratings_source": ratings_source,
+        "ratings_sha": ratings_sha,
+        "anchors_source": anchors_source,
+        "anchors_sha": anchors_sha,
+        "pair_overrides_source": "market_anchors.json",
+        "pair_overrides_sha": _sha(DATA / "market_anchors.json"),
+        "event_config_sha": "pending-w5",
+        "market_policy_version": "exact-override+ANCHOR_LAMBDA=0.5",
+        "sim_policy_version": f"swiss-mc;priority_table={simulate.USE_PRIORITY_TABLE}",
+        "n_sims": N_SIMS,
+        "seed": SEED,
     }
 
 
@@ -155,11 +202,16 @@ def main():
             fav = a if pa >= pb else b
             print(f"{a} vs {b:14s} {pa:10.3f} {pb:10.3f} {fav:>12s} {swing:7.3f}")
 
+    anchors_source = "live_anchors.json" if live_anchors_path.exists() else "none"
+    anchors_sha = _sha(live_anchors_path) if live_anchors_path.exists() else None
     entry = build_log_entry(
         ts=datetime.now(timezone.utc).isoformat(timespec="seconds"),
         ratings_source=ratings_file, ratings_sha=ratings_sha,
         n_anchors=n_loaded, completed=completed, upcoming=upcoming,
-        p_pass=p5, e_ticks=ev, stats=stats, rooting=sorted(rows, reverse=True))
+        p_pass=p5, e_ticks=ev, stats=stats, rooting=sorted(rows, reverse=True),
+        manifest=forecast_manifest(ratings_file, ratings_sha, anchors_source,
+                                   anchors_sha),
+        match_forecasts=per_match_forecasts(ratings, upcoming))
     with open(DATA / "calibration_log.jsonl", "a") as f:
         f.write(json.dumps(entry) + "\n")
     print(f"\nLogged -> data/calibration_log.jsonl")

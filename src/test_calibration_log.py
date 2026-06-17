@@ -1,9 +1,9 @@
-"""Calibration-log entry builder tests: structure and determinism."""
+"""Calibration-log entry builder tests: structure, determinism, forward manifest."""
 
 import json
 import unittest
 
-from live import build_log_entry
+from live import build_log_entry, per_match_forecasts
 
 STATS = {"Vitality": {"p30": 0.0, "padv": 0.88, "pany": 0.88, "p03": 0.0}}
 ROOTING = [(0.378, "Aurora", "Spirit", 0.101, 0.479)]
@@ -40,6 +40,35 @@ class TestBuildLogEntry(unittest.TestCase):
         self.assertAlmostEqual(r["p_pass_a"], 0.101)
         self.assertAlmostEqual(r["p_pass_b"], 0.479)
         self.assertAlmostEqual(r["swing"], 0.378)
+
+    def test_manifest_and_forecasts_default_to_none(self):
+        # Backward compatible: callers that don't pass them still round-trip.
+        self.assertIsNone(self.entry["manifest"])
+        self.assertIsNone(self.entry["match_forecasts"])
+
+
+class TestForwardManifest(unittest.TestCase):   # W2b
+    def test_entry_carries_manifest_and_forecasts(self):
+        entry = build_log_entry(
+            ts="t", ratings_source="ratings_locked_v3.json", ratings_sha="s",
+            n_anchors=0, completed=[], upcoming=[("X", "Y")], p_pass=0.5,
+            e_ticks=5.0, stats={}, rooting=[],
+            manifest={"code_sha": "abc", "code_dirty": False,
+                      "event_config_sha": "pending-w5", "n_sims": 40000, "seed": 11},
+            match_forecasts=[{"a": "X", "b": "Y", "model_prob": 0.6,
+                              "market_prob": None}])
+        self.assertEqual(entry["manifest"]["code_sha"], "abc")
+        self.assertEqual(entry["manifest"]["event_config_sha"], "pending-w5")
+        self.assertEqual(entry["match_forecasts"][0]["model_prob"], 0.6)
+        self.assertEqual(json.loads(json.dumps(entry)), entry)   # round-trips
+
+    def test_per_match_forecasts_captures_immutable_model_prob(self):
+        # Teams absent from PAIR_OVERRIDES -> model_prob is the rating-implied
+        # prob, market_prob is None. 1000 vs 900 Elo -> ~0.64.
+        rows = per_match_forecasts({"X": 1000.0, "Y": 900.0}, [("X", "Y")])
+        self.assertEqual((rows[0]["a"], rows[0]["b"]), ("X", "Y"))
+        self.assertAlmostEqual(rows[0]["model_prob"], 0.640065, places=4)
+        self.assertIsNone(rows[0]["market_prob"])
 
 
 if __name__ == "__main__":
