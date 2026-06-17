@@ -1,0 +1,4 @@
+{
+  "comment": "IEM Cologne Major 2026 playoff bracket (top-8 single-elim). Seeds 1-8 in final Stage 3 seed order (W-L -> Buchholz -> initial seed). Announced bracket confirmed three ways: rulebook derivation from completed live_state.json, Polymarket QF markets (Spirit-G2, Vitality-Falcons, FURIA-9z, Aurora-BetBoom), all agreeing. QF pairing 1v8+4v5 (top half -> SF1) and 2v7+3v6 (bottom half -> SF2).",
+  "seeds": ["Spirit", "FURIA", "Aurora", "Vitality", "Falcons", "BetBoom", "9z", "G2"]
+}
