@@ -1,32 +1,31 @@
-"""Graded calibration log + grader (W2 of the engine-correctness Phase I build).
+"""Graded calibration log + grader (W2 + W2-hardening of the Phase I build).
 
 Turns the forecast log into a *graded* one: per-match model-vs-market-vs-outcome
 rows and per-team stage-outcome rows, persisted append-only with superseding
-semantics, re-gradeable from immutable inputs. This is the data the validation
-harness (V1) and the market layer (M-tier) will read.
+semantics, re-gradeable from immutable inputs. The data V1 (the harness) and the
+M-tier read.
 
-Design choices (from docs/plans/2026-06-17-engine-correctness-implementation.md):
-  - **Wraps the existing grader, no new scoring dialect.** Row-level Brier/log
-    are the math that lived in postmortem_matches' print path; the market close
-    join is market_close (W1). The aggregate summary is cross-checked against
-    postmortem_matches.grade_matches.
-  - **Two row kinds, discriminated by `kind`:** "match" (market-relative —
-    model/close prob, result, brier, log_loss, delta) and "team" (market-free —
-    p30/padv/p03 vs record). One file, never silently mixed.
-  - **Adoption eligibility:** a match row is adoption-eligible only if it has a
-    real close that is not flagged (flagged = in-play fallback, §6). Flagged rows
-    are logged + re-gradeable but excluded from the default aggregate / adoption
-    gates unless --include-flagged.
-  - **Append-only + superseding:** corrections append a new row with the same
-    key; load_latest() returns the last per key. Nothing is ever rewritten.
-  - **Per-match model prob provenance:** reconstructed from a frozen ratings file
-    + pair overrides (the Cologne backfill uses ratings_locked_v3). Recorded as
-    reconstruction_mode="backfill_reconstructed" with the input hashes, so the
-    row stays re-gradeable. Forward events get the live.py forecast manifest (W2b).
+Adoption gating (DoR §6 + §2.3) — a match row may be ADOPTION-GATE evidence only
+if all hold:
+  - it has a real market close (close_prob is not None),
+  - that close is not flagged (flagged = in-play fallback, §6),
+  - it is MANIFESTED: a recorded lock contract that makes the model prob exactly
+    replayable (is_manifested) — backfill_reconstructed/forecast_manifest with the
+    input hashes and a CLEAN code tree, or immutable_forecast. An unmanifested or
+    dirty-tree row is logged + re-gradeable but never counted in an adoption gate.
 
-Usage (Cologne backfill):
+This split (close-usability vs replayability) was added after an external review
+caught that an unmanifested row was adoption-eligible and that the committed log
+recorded a code_sha that did not contain this grader (generated from a dirty,
+pre-commit tree). _git_sha now also reports code-dirtiness.
+
+Two row kinds, discriminated by `kind`: "match" (market-relative) and "team"
+(market-free p30/padv/p03 vs record). One append-only file; load_latest applies
+superseding (last per key wins, nothing rewritten).
+
+Usage (Cologne backfill / regrade):
   python src/calibration.py --grade-event cologne-stage3
-  python src/calibration.py --grade-event cologne-stage3 --include-flagged
+  python src/calibration.py --grade-event cologne-stage3 --force   # superseding re-grade
 """
 
 import argparse
@@ -36,11 +35,24 @@ import math
 import subprocess
 from pathlib import Path
 
-DATA = Path(__file__).resolve().parent.parent / "data"
+REPO = Path(__file__).resolve().parent.parent
+DATA = REPO / "data"
 GRADE_VERSION = "v1"
 GRADED_LOG = DATA / "calibration_graded.jsonl"
 
 _CATS = ("p30", "padv", "p03")
+
+COLOGNE_SNAPSHOT = {
+    "event": "cologne-stage3",
+    "matches_file": "results_matches_stage3.json",
+    "ratings_file": "ratings_locked_v3.json",
+    "anchors_file": "market_anchors.json",
+    "archive_file": "odds_archive.jsonl",
+    "results_file": "results_stage3.json",
+    "team_tables": [("v1", "stage3_probs_locked_v1.json"),
+                    ("v2", "stage3_probs_locked_v2.json"),
+                    ("v3", "stage3_probs.json")],
+}
 
 
 # -- scoring primitives ------------------------------------------------------
@@ -53,17 +65,34 @@ def _logloss(p, y):
     return -(y * math.log(p) + (1 - y) * math.log(1 - p))
 
 
+# -- manifest / adoption contract (DoR §2.3) ---------------------------------
+_ADOPTION_MODES = ("backfill_reconstructed", "forecast_manifest")
+
+
+def is_manifested(provenance):
+    """True iff the row's model prob is exactly replayable from a recorded lock
+    contract. A dirty code tree is never replayable from its sha, so it fails."""
+    if not provenance or provenance.get("code_dirty"):
+        return False
+    mode = provenance.get("reconstruction_mode")
+    if mode in _ADOPTION_MODES:
+        return bool(provenance.get("code_sha") and provenance.get("ratings_sha"))
+    if mode == "immutable_forecast":   # per-match prob logged at lock
+        return bool(provenance.get("code_sha"))
+    return False
+
+
 def grade_match_row(a, b, winner, model_prob, close, *, market_prob=None,
                     provenance=None):
     """One kind:"match" graded row. Probabilities are P(a wins).
 
-    close = a market_close.close_row(...) dict (with p_a/flagged/close_rule/ts/
-    slug) or None. market_prob = the market line the model USED at lock (anchor),
-    distinct from close_prob (the closing line we grade against); provenance for
-    the anchored-pair degeneracy, not used in scoring."""
+    close = a market_close.close_row(...) dict (p_a/flagged/close_rule/ts/slug/
+    volume) or None. market_prob = the line the model USED at lock (anchor),
+    distinct from close_prob (the closing line we grade against)."""
     y = 1.0 if winner == a else 0.0
     close_prob = close["p_a"] if close else None
     flagged = close["flagged"] if close else None
+    manifested = is_manifested(provenance)
     row = {
         "kind": "match", "a": a, "b": b, "winner": winner, "result": y,
         "model_prob": model_prob, "market_prob": market_prob,
@@ -72,8 +101,10 @@ def grade_match_row(a, b, winner, model_prob, close, *, market_prob=None,
         "close_flagged": flagged,
         "close_ts": close["ts"] if close else None,
         "close_slug": close.get("slug") if close else None,
+        "close_volume": close.get("volume") if close else None,
         "brier_model": _brier(model_prob, y),
         "log_model": _logloss(model_prob, y),
+        "manifested": manifested,
     }
     if close_prob is not None:
         row["brier_market"] = _brier(close_prob, y)
@@ -83,8 +114,9 @@ def grade_match_row(a, b, winner, model_prob, close, *, market_prob=None,
     else:
         row["brier_market"] = row["log_market"] = None
         row["delta_brier"] = row["delta_log"] = None
-    # Adoption-eligible only with a real, unflagged close (DoR §6).
-    row["adoption_eligible"] = close_prob is not None and not flagged
+    # Adoption-eligible = close usable (§6) AND replayable (§2.3).
+    row["adoption_eligible"] = (close_prob is not None and not flagged
+                                and manifested)
     if provenance:
         row["provenance"] = provenance
     return row
@@ -138,33 +170,38 @@ def load_latest(path=GRADED_LOG):
     return list(latest.values())
 
 
-# -- aggregate summary (cross-checks postmortem_matches.grade_matches) -------
-def summarize(rows, include_flagged=False):
+# -- aggregate summary -------------------------------------------------------
+def summarize(rows, include_flagged=False, require_manifest=True):
     """Aggregate model-vs-market Brier/log over match rows that HAVE a close.
-    Adoption-eligible (unflagged) rows only by default; flagged rows counted but
-    excluded unless include_flagged. Per-team rows are ignored here."""
+
+    Default = the ADOPTION summary (DoR §2.3/§6): unflagged AND manifested rows
+    only. require_manifest=False gives the manifest-agnostic scoring view (what
+    postmortem_matches computes — used for the cross-check). include_flagged
+    additionally folds in in-play-fallback closes. Per-team rows are ignored."""
     graded = [r for r in rows
               if r["kind"] == "match" and r["close_prob"] is not None]
-    eligible = [r for r in graded if r["adoption_eligible"]]
-    used = graded if include_flagged else eligible
-    summary = {"eligible_n": len(eligible),
-               "excluded_flagged_n": len(graded) - len(eligible),
-               "n": len(used)}
-    if not used:
-        return summary
-    n = len(used)
-    mb = sum(r["brier_model"] for r in used) / n
-    kb = sum(r["brier_market"] for r in used) / n
-    ml = sum(r["log_model"] for r in used) / n
-    kl = sum(r["log_market"] for r in used) / n
-    summary.update({
-        "model": {"brier": mb, "log": ml},
-        "market": {"brier": kb, "log": kl},
-        "delta_brier": kb - mb, "delta_log": kl - ml})
+    flagged_n = sum(1 for r in graded if r["close_flagged"])
+    unflagged = [r for r in graded if not r["close_flagged"]]
+    unmanifested_n = sum(1 for r in unflagged if not r.get("manifested"))
+    pool = graded if include_flagged else unflagged
+    used = [r for r in pool if r.get("manifested")] if require_manifest else pool
+    summary = {"n": len(used),
+               "eligible_n": sum(1 for r in graded if r.get("adoption_eligible")),
+               "excluded_flagged_n": flagged_n,
+               "excluded_unmanifested_n": unmanifested_n}
+    if used:
+        n = len(used)
+        mb = sum(r["brier_model"] for r in used) / n
+        kb = sum(r["brier_market"] for r in used) / n
+        ml = sum(r["log_model"] for r in used) / n
+        kl = sum(r["log_market"] for r in used) / n
+        summary.update({"model": {"brier": mb, "log": ml},
+                        "market": {"brier": kb, "log": kl},
+                        "delta_brier": kb - mb, "delta_log": kl - ml})
     return summary
 
 
-# -- provenance + backfill orchestration -------------------------------------
+# -- provenance helpers ------------------------------------------------------
 def _sha(path):
     return hashlib.sha1(Path(path).read_bytes()).hexdigest()[:12]
 
@@ -172,18 +209,27 @@ def _sha(path):
 def _git_sha():
     try:
         return subprocess.check_output(
-            ["git", "rev-parse", "--short", "HEAD"],
-            cwd=Path(__file__).resolve().parent, text=True).strip()
+            ["git", "rev-parse", "--short", "HEAD"], cwd=REPO, text=True).strip()
     except Exception:
         return "unknown"
 
 
+def _src_dirty():
+    """True if tracked files under src/ have uncommitted changes — i.e. the code
+    that produced these rows is not the committed code at code_sha. The output
+    log's own dirtiness is irrelevant, so we scope the check to src/."""
+    try:
+        out = subprocess.check_output(
+            ["git", "status", "--porcelain", "--", "src"], cwd=REPO, text=True)
+        return bool(out.strip())
+    except Exception:
+        return True   # unknown provenance -> assume dirty (honest pessimism)
+
+
+# -- event grading + regrade -------------------------------------------------
 def grade_event_matches(matches, ratings, overrides, archive, event,
                         model_version, provenance):
-    """Build kind:"match" rows for one event (pure given its inputs).
-
-    matches: [{a, b, winner, start}]; ratings: team->rating; overrides:
-    {(a,b): p_a} market lines used at lock; archive: odds rows for close lookup."""
+    """Build kind:"match" rows for one event (pure given its inputs)."""
     from market_close import close_row
     from model import win_prob
     rows = []
@@ -215,40 +261,52 @@ def grade_team_table(probs_table, results, event, model_version, provenance):
     return rows
 
 
-def backfill_cologne():
-    """Reconstruct + persist the Cologne graded rows. Per-match = the v3 lock
-    (model probs reconstructed from ratings_locked_v3 + market_anchors); per-team
-    = v1/v2/v3 locked tables vs the final records."""
-    event = "cologne-stage3"
-    from model import load_pair_overrides
-    archive = load_log(DATA / "odds_archive.jsonl")
-    matches = json.load(open(DATA / "results_matches_stage3.json"))["matches"]
-    ratings = json.load(open(DATA / "ratings_locked_v3.json"))
-    overrides = load_pair_overrides(DATA / "market_anchors.json")
-    match_prov = {
-        "grade_version": GRADE_VERSION, "code_sha": _git_sha(),
-        "reconstruction_mode": "backfill_reconstructed",
-        "ratings_source": "ratings_locked_v3.json",
-        "ratings_sha": _sha(DATA / "ratings_locked_v3.json"),
-        "anchors_source": "market_anchors.json",
-        "anchors_sha": _sha(DATA / "market_anchors.json"),
-        "pair_overrides_version": "load_pair_overrides@market_anchors.json",
-    }
+def grade_event(event, matches, ratings, overrides, archive, match_provenance,
+                team_tables, results):
+    """All graded rows (match + team) for one event from LOADED inputs. Pure
+    given its inputs -> the unit of re-gradeability. team_tables = list of
+    (model_version, probs_dict, provenance)."""
     rows = grade_event_matches(matches, ratings, overrides, archive, event,
-                               "v3-lock", match_prov)
-
-    results = {t: tuple(r) for t, r in
-               json.load(open(DATA / "results_stage3.json")).items()}
-    tables = [("v1", "stage3_probs_locked_v1.json"),
-              ("v2", "stage3_probs_locked_v2.json"),
-              ("v3", "stage3_probs.json")]
-    for ver, fn in tables:
-        probs = json.load(open(DATA / fn))["probs"]
-        prov = {"grade_version": GRADE_VERSION, "code_sha": _git_sha(),
-                "reconstruction_mode": "backfill_reconstructed",
-                "probs_source": fn, "probs_sha": _sha(DATA / fn)}
-        rows += grade_team_table(probs, results, event, ver, prov)
+                               "v3-lock", match_provenance)
+    for version, probs, prov in team_tables:
+        rows += grade_team_table(probs, results, event, version, prov)
     return rows
+
+
+def regrade_from_snapshot(snapshot=None):
+    """Load the immutable inputs named in the snapshot, stamp provenance with
+    their current hashes + code state, and grade. Deterministic: identical inputs
+    -> identical rows. Read-only (does not append)."""
+    snap = snapshot or COLOGNE_SNAPSHOT
+    from model import load_pair_overrides
+    archive = load_log(DATA / snap["archive_file"])
+    matches = json.load(open(DATA / snap["matches_file"]))["matches"]
+    ratings = json.load(open(DATA / snap["ratings_file"]))
+    overrides = load_pair_overrides(DATA / snap["anchors_file"])
+    code_sha, code_dirty = _git_sha(), _src_dirty()
+    match_prov = {
+        "grade_version": GRADE_VERSION, "code_sha": code_sha,
+        "code_dirty": code_dirty, "reconstruction_mode": "backfill_reconstructed",
+        "ratings_source": snap["ratings_file"],
+        "ratings_sha": _sha(DATA / snap["ratings_file"]),
+        "anchors_source": snap["anchors_file"],
+        "anchors_sha": _sha(DATA / snap["anchors_file"]),
+        "pair_overrides_version": f"load_pair_overrides@{snap['anchors_file']}",
+    }
+    results = {t: tuple(r) for t, r in
+               json.load(open(DATA / snap["results_file"])).items()}
+    team_tables = []
+    for version, fn in snap["team_tables"]:
+        probs = json.load(open(DATA / fn))["probs"]
+        prov = {"grade_version": GRADE_VERSION, "code_sha": code_sha,
+                "code_dirty": code_dirty,
+                "reconstruction_mode": "backfill_reconstructed",
+                # team rows: ratings_sha stands in via the probs table hash
+                "ratings_sha": _sha(DATA / fn),
+                "probs_source": fn, "probs_sha": _sha(DATA / fn)}
+        team_tables.append((version, probs, prov))
+    return grade_event(snap["event"], matches, ratings, overrides, archive,
+                       match_prov, team_tables, results)
 
 
 def main():
@@ -257,23 +315,33 @@ def main():
                     help="event id to (re)grade; only cologne-stage3 wired today")
     ap.add_argument("--include-flagged", action="store_true",
                     help="include in-play-fallback closes in the summary")
+    ap.add_argument("--force", action="store_true",
+                    help="append a superseding re-grade even if already logged")
     args = ap.parse_args()
     if args.grade_event != "cologne-stage3":
         raise SystemExit(f"only cologne-stage3 is wired (got {args.grade_event})")
 
-    rows = backfill_cologne()
+    already = args.grade_event in {r.get("event") for r in load_log(GRADED_LOG)}
+    if already and not args.force:
+        raise SystemExit(
+            f"{args.grade_event} already in {GRADED_LOG.name}; re-running would "
+            f"append duplicates. Use --force for a superseding re-grade.")
+
+    rows = regrade_from_snapshot()
     append_log(rows, GRADED_LOG)
     match_rows = [r for r in rows if r["kind"] == "match"]
-    s = summarize(rows, include_flagged=args.include_flagged)
+    s = summarize(rows, include_flagged=args.include_flagged)        # adoption view
+    xc = summarize(rows, require_manifest=False)                     # cross-check view
     print(f"Graded {len(match_rows)} matches (v3 lock) + "
           f"{len(rows) - len(match_rows)} team rows -> {GRADED_LOG.name}")
-    print(f"  eligible matches: {s['eligible_n']}  "
-          f"(excluded flagged: {s['excluded_flagged_n']})")
-    if s["n"]:
-        print(f"  model  Brier {s['model']['brier']:.4f}  log {s['model']['log']:.4f}")
-        print(f"  market Brier {s['market']['brier']:.4f}  log {s['market']['log']:.4f}")
+    print(f"  adoption-eligible matches: {s['eligible_n']}  "
+          f"(flagged {s['excluded_flagged_n']}, unmanifested {s['excluded_unmanifested_n']})")
+    if xc["n"]:
+        print(f"  model  Brier {xc['model']['brier']:.4f}  log {xc['model']['log']:.4f}")
+        print(f"  market Brier {xc['market']['brier']:.4f}  log {xc['market']['log']:.4f}")
         print(f"  delta (market - model; + = model beat close): "
-              f"Brier {s['delta_brier']:+.4f}, log {s['delta_log']:+.4f}")
+              f"Brier {xc['delta_brier']:+.4f}, log {xc['delta_log']:+.4f}  "
+              f"[over {xc['n']} unflagged matches, manifest-agnostic]")
     print("E.7 humility: one event, correlated matches, tiny n. Evidence, not a verdict.")
 
 
