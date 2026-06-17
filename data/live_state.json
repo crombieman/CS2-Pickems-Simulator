@@ -119,9 +119,7 @@
     [
       "G2",
       "Legacy"
-    ]
-  ],
-  "upcoming": [
+    ],
     [
       "9z",
       "MongolZ"
@@ -131,8 +129,9 @@
       "FUT"
     ],
     [
-      "NAVI",
-      "G2"
+      "G2",
+      "NAVI"
     ]
-  ]
+  ],
+  "upcoming": []
 }
