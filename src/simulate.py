@@ -18,6 +18,7 @@ Known approximations (second-order for advance/3-0/0-3 probabilities):
 import collections
 import random
 
+from event_config import COLOGNE
 from model import STAGE3_TEAMS, load_pair_overrides, win_prob
 
 # Anchored matchups play at the exact market prob whenever the pair meets;
@@ -31,23 +32,14 @@ def match_prob(ratings, a: str, b: str) -> float:
     return p if p is not None else win_prob(ratings, a, b)
 
 
-ROUND1 = [
-    ("Vitality", "FUT"), ("NAVI", "Spirit"), ("MOUZ", "Legacy"),
-    ("Falcons", "G2"), ("MongolZ", "BetBoom"), ("Aurora", "Monte"),
-    ("FURIA", "B8"), ("PARIVISION", "9z"),
-]
-
-# Official Stage 3 initial seeds, derived 2026-06-12 by inverting the R1
-# bracket (1v9..8v16) against the post-R1 standings order, and validated by
-# reproducing the announced R2 pairings 8/8 under the rulebook's
-# highest-vs-lowest rule. (The original guess — STAGE3_TEAMS order — got
-# R2 pairings 1/8: MOUZ/Spirit/9z were all misplaced.)
-SEED = {
-    "Vitality": 1, "NAVI": 2, "Falcons": 3, "MongolZ": 4,
-    "Aurora": 5, "FURIA": 6, "MOUZ": 7, "PARIVISION": 8,
-    "FUT": 9, "Spirit": 10, "G2": 11, "BetBoom": 12,
-    "Monte": 13, "B8": 14, "Legacy": 15, "9z": 16,
-}
+# R1 pairings and initial seeds now come from the event config (W5) — the
+# Cologne values are byte-identical to the former in-code literals. The seeds
+# were derived 2026-06-12 by inverting the R1 bracket (1v9..8v16) against the
+# post-R1 standings order, validated by reproducing the announced R2 pairings
+# 8/8 under the rulebook's highest-vs-lowest rule. (The original guess —
+# STAGE3_TEAMS order — got R2 pairings 1/8: MOUZ/Spirit/9z were misplaced.)
+ROUND1 = COLOGNE.round1
+SEED = COLOGNE.seeds
 
 # Pre-fix seed order (list position in STAGE3_TEAMS). The locked v1-v3
 # probability tables were generated under this mapping; the regression

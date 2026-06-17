@@ -71,5 +71,16 @@ class TestForwardManifest(unittest.TestCase):   # W2b
         self.assertIsNone(rows[0]["market_prob"])
 
 
+class TestForecastManifestEventConfig(unittest.TestCase):   # W5
+    def test_event_config_sha_is_real_hash_not_placeholder(self):
+        # W5 replaced the 'pending-w5' placeholder with the actual hash of the
+        # per-event config, so a forward forecast is replayable against the
+        # teams/seeds/scoring it was made under.
+        from live import forecast_manifest
+        m = forecast_manifest("ratings_fitted.json", "deadbeef", "none", None)
+        self.assertNotEqual(m["event_config_sha"], "pending-w5")
+        self.assertEqual(len(m["event_config_sha"]), 12)   # _sha() -> 12-char hex
+
+
 if __name__ == "__main__":
     unittest.main()

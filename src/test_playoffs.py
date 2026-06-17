@@ -280,5 +280,15 @@ class TestRatingDraws(unittest.TestCase):
         self.assertGreater(spread, 1.0)  # draws actually vary
 
 
+class TestEventConfigWiring(unittest.TestCase):
+    """W5: playoff format comes from the event config, not a hard-coded flag."""
+
+    def test_grand_final_bo5_from_config(self):
+        import playoffs
+        from event_config import COLOGNE
+        self.assertEqual(playoffs.GRAND_FINAL_BO5,
+                         COLOGNE.playoffs["grand_final_bo5"])
+
+
 if __name__ == "__main__":
     unittest.main()

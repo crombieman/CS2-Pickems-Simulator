@@ -127,8 +127,8 @@ def forecast_manifest(ratings_source, ratings_sha, anchors_source, anchors_sha):
     """Replay manifest (DoR §2.3): names + hashes every input needed to
     reproduce the per-match probabilities, plus a code-dirty marker. The grader
     treats a row as adoption-eligible only if this is present and not dirty.
-    event_config_sha is 'pending-w5' until the event-config refactor (W5) gives
-    events a config hash."""
+    event_config_sha hashes the per-event config (W5) so a forward forecast is
+    replayable against the exact teams/seeds/scoring it was made under."""
     return {
         "manifest_version": "v1",
         "code_sha": _git_sha(),
@@ -139,7 +139,7 @@ def forecast_manifest(ratings_source, ratings_sha, anchors_source, anchors_sha):
         "anchors_sha": anchors_sha,
         "pair_overrides_source": "market_anchors.json",
         "pair_overrides_sha": _sha(DATA / "market_anchors.json"),
-        "event_config_sha": "pending-w5",
+        "event_config_sha": _sha(DATA / "events" / "cologne_major.json"),
         "market_policy_version": "exact-override+ANCHOR_LAMBDA=0.5",
         "sim_policy_version": f"swiss-mc;priority_table={simulate.USE_PRIORITY_TABLE}",
         "n_sims": N_SIMS,

@@ -1,0 +1,43 @@
+{
+  "_comment": "IEM Cologne Major 2026 — Stage 3 (16-team Valve Swiss). Event facts lifted from in-code literals (model.STAGE3_TEAMS, simulate.ROUND1/SEED, optimize scoring, playoffs format) by W5. teams order, round1 order, and seeds are REPRODUCIBILITY-CRITICAL: the locked v1-v3 tables + ratings_fitted.json were generated under exactly these — do not reorder. lock_timestamp left null pending the exact Stage-3 pick-lock UTC.",
+  "event_id": "cologne_major_2026_stage3",
+  "name": "IEM Cologne Major 2026 — Stage 3",
+  "format": {
+    "type": "swiss_16",
+    "series": "bo3",
+    "wins_to_advance": 3,
+    "losses_to_eliminate": 3
+  },
+  "teams": [
+    "Vitality", "NAVI", "MOUZ", "Falcons", "MongolZ", "Aurora", "FURIA",
+    "PARIVISION", "Spirit", "FUT", "G2", "9z", "BetBoom", "Legacy", "Monte",
+    "B8"
+  ],
+  "round1": [
+    ["Vitality", "FUT"], ["NAVI", "Spirit"], ["MOUZ", "Legacy"],
+    ["Falcons", "G2"], ["MongolZ", "BetBoom"], ["Aurora", "Monte"],
+    ["FURIA", "B8"], ["PARIVISION", "9z"]
+  ],
+  "seeds": {
+    "Vitality": 1, "NAVI": 2, "Falcons": 3, "MongolZ": 4,
+    "Aurora": 5, "FURIA": 6, "MOUZ": 7, "PARIVISION": 8,
+    "FUT": 9, "Spirit": 10, "G2": 11, "BetBoom": 12,
+    "Monte": 13, "B8": 14, "Legacy": 15, "9z": 16
+  },
+  "scoring": {
+    "exact_3_0": 2,
+    "exact_0_3": 2,
+    "advance": 6,
+    "pass_threshold": 5,
+    "slate_size": 10
+  },
+  "optimizer_objective": "p_ge_threshold",
+  "playoffs": {
+    "teams": 8,
+    "qf_format": "bo3",
+    "sf_format": "bo3",
+    "grand_final_bo5": true
+  },
+  "ruleset_version": "valve-major-supplemental-2026",
+  "lock_timestamp": null
+}

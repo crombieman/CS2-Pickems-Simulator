@@ -17,13 +17,15 @@ import json
 import math
 from pathlib import Path
 
+from event_config import COLOGNE
+
 DATA = Path(__file__).resolve().parent.parent / "data"
 
-STAGE3_TEAMS = [
-    "Vitality", "NAVI", "MOUZ", "Falcons", "MongolZ", "Aurora", "FURIA",
-    "PARIVISION",  # seeds 1-8 (Valve Global Standings, invited)
-    "Spirit", "FUT", "G2", "9z", "BetBoom", "Legacy", "Monte", "B8",
-]  # 9-16 seeded by Stage 2 Swiss + Buchholz
+# Event facts now live in data/events/<event>.json (W5). The Cologne config
+# holds the exact team order the locked fit + tables were generated under, so
+# this is byte-identical to the former in-code literal. Seeds 1-8 are the
+# Valve Global Standings invitees; 9-16 are seeded by Stage 2 Swiss + Buchholz.
+STAGE3_TEAMS = COLOGNE.teams
 
 # Prior means. Stage 3 teams: market-informed estimates (two GGbet BO3 lines +
 # outright odds + VRS position) as of 2026-06-09. Connector teams (eliminated

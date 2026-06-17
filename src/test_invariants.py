@@ -151,5 +151,34 @@ class TestLockedRegression(unittest.TestCase):
                                        msg=f"{t}.{k} drifted from locked value")
 
 
+class TestEventConfigWiring(unittest.TestCase):
+    """W5: the reproducibility-critical event facts must be sourced from the
+    Cologne event config (data/events/cologne_major.json), not re-hardcoded.
+    If these drift from the config, the locked tables + ratings_fitted.json
+    stop reproducing — so pin the wiring, not just the values."""
+
+    def test_simulate_facts_come_from_cologne_config(self):
+        import simulate
+        from event_config import COLOGNE
+        self.assertEqual(simulate.ROUND1, COLOGNE.round1)
+        self.assertEqual(simulate.SEED, COLOGNE.seeds)
+        self.assertEqual(STAGE3_TEAMS, COLOGNE.teams)
+
+    def test_legacy_seed_still_derives_from_team_order(self):
+        # TestLockedRegression replays under LEGACY_SEED; it must stay the
+        # enumerate-of-team-order map the locked tables were generated with.
+        import simulate
+        self.assertEqual(simulate.LEGACY_SEED,
+                         {t: i for i, t in enumerate(STAGE3_TEAMS)})
+
+    def test_optimizer_scoring_comes_from_config(self):
+        import optimize
+        from event_config import COLOGNE
+        s = COLOGNE.scoring
+        self.assertEqual((optimize.N_30, optimize.N_03, optimize.N_ADV),
+                         (s["exact_3_0"], s["exact_0_3"], s["advance"]))
+        self.assertEqual(optimize.PASS_THRESHOLD, s["pass_threshold"])
+
+
 if __name__ == "__main__":
     unittest.main()

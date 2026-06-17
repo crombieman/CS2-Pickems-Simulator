@@ -32,12 +32,14 @@ import itertools
 import json
 from pathlib import Path
 
+from event_config import COLOGNE
 from model import STAGE3_TEAMS, win_prob
 from simulate import SEED, make_state
 
 DATA = Path(__file__).resolve().parent.parent / "data"
 
-GRAND_FINAL_BO5 = True
+# Playoff format from the event config (W5): Cologne grand final is BO5.
+GRAND_FINAL_BO5 = COLOGNE.playoffs["grand_final_bo5"]
 
 K_DRAWS = 200
 K_ENVELOPE = 100
