@@ -20,10 +20,19 @@ CLOSE = {"p_a": 0.60, "flagged": False, "close_rule": "v1:test",
          "ts": "2026-06-11T08:00:00+00:00", "slug": "m1", "volume": 5000.0}
 CLOSE_FLAGGED = {**CLOSE, "flagged": True}
 
-# A valid lock contract (backfill mode, clean code, required hashes present).
+# A valid lock contract (backfill mode, clean code, every load-bearing replay
+# hash present). anchors_sha is required: a priced match's model prob IS the
+# market anchor, so the anchors must be reproducible to replay the row.
 MANIFEST = {"reconstruction_mode": "backfill_reconstructed",
-            "code_sha": "abc1234", "ratings_sha": "def5678", "code_dirty": False}
+            "code_sha": "abc1234", "ratings_sha": "def5678",
+            "anchors_sha": "0011aabb", "code_dirty": False}
 MANIFEST_DIRTY = {**MANIFEST, "code_dirty": True}
+
+# A complete forward forecast lock contract (the W2b/live.py manifest shape).
+FWD_MANIFEST = {"reconstruction_mode": "forecast_manifest",
+                "code_sha": "abc1234", "ratings_sha": "def5678",
+                "anchors_sha": "0011aabb", "pair_overrides_sha": "ccdd2233",
+                "event_config_sha": "effeed009988", "code_dirty": False}
 
 
 class TestGradeMatchRow(unittest.TestCase):
@@ -86,9 +95,41 @@ class TestAdoptionEligibility(unittest.TestCase):   # P1a
 
     def test_is_manifested_contract(self):
         self.assertTrue(is_manifested(MANIFEST))
+        self.assertTrue(is_manifested(FWD_MANIFEST))
         self.assertFalse(is_manifested(None))
         self.assertFalse(is_manifested({"reconstruction_mode": "backfill_reconstructed"}))  # no hashes
         self.assertFalse(is_manifested(MANIFEST_DIRTY))
+
+    def test_backfill_missing_anchors_not_manifested(self):
+        # The hole: a priced match's model prob IS the anchor, so a manifest
+        # without anchors_sha cannot replay the row -> not adoptable.
+        no_anchors = {k: v for k, v in MANIFEST.items() if k != "anchors_sha"}
+        self.assertFalse(is_manifested(no_anchors))
+
+    def test_forecast_manifest_missing_input_hash_not_manifested(self):
+        # forward forecast missing one load-bearing input hash -> not replayable.
+        no_pairov = {k: v for k, v in FWD_MANIFEST.items()
+                     if k != "pair_overrides_sha"}
+        self.assertFalse(is_manifested(no_pairov))
+
+    def test_placeholder_hash_not_manifested(self):
+        # A 'pending-*' placeholder in ANY hash field (e.g. a pre-W5 forward row
+        # stamped event_config_sha='pending-w5') means it was never pinned.
+        pending = {**FWD_MANIFEST, "event_config_sha": "pending-w5"}
+        self.assertFalse(is_manifested(pending))
+
+    def test_absent_dirty_marker_not_manifested(self):
+        # No dirty marker = unknown provenance = honest pessimism -> not adoptable.
+        no_marker = {k: v for k, v in MANIFEST.items() if k != "code_dirty"}
+        self.assertFalse(is_manifested(no_marker))
+
+    def test_unknown_reconstruction_mode_not_manifested(self):
+        self.assertFalse(is_manifested({**MANIFEST, "reconstruction_mode": "guessed"}))
+
+    def test_immutable_forecast_is_self_contained(self):
+        # per-match prob logged at lock -> code_sha + clean tree is enough.
+        self.assertTrue(is_manifested({"reconstruction_mode": "immutable_forecast",
+                                       "code_sha": "abc1234", "code_dirty": False}))
 
 
 class TestGradeTeamRow(unittest.TestCase):

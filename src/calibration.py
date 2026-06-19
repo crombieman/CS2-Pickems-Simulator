@@ -66,20 +66,43 @@ def _logloss(p, y):
 
 
 # -- manifest / adoption contract (DoR §2.3) ---------------------------------
-_ADOPTION_MODES = ("backfill_reconstructed", "forecast_manifest")
+# Replay-input hashes a row's model prob actually depends on, per reconstruction
+# mode. A priced match's model prob IS the market anchor (grade_event_matches),
+# so anchors_sha is load-bearing wherever the model prob can be an anchor; the
+# forward manifest additionally pins pair_overrides separately. immutable_forecast
+# logs the per-match prob itself, so the code sha alone makes it replayable.
+_REQUIRED_HASHES = {
+    "backfill_reconstructed": ("code_sha", "ratings_sha", "anchors_sha"),
+    "forecast_manifest": ("code_sha", "ratings_sha", "anchors_sha",
+                          "pair_overrides_sha"),
+    "immutable_forecast": ("code_sha",),
+}
+
+
+def _resolved_hash(v):
+    """A provenance hash that was actually pinned — not missing, empty, a known
+    unresolved sentinel, or a 'pending-*' placeholder (e.g. event_config_sha=
+    'pending-w5' on a forward row logged before the event config was pinned)."""
+    return bool(v) and v != "unknown" and not str(v).startswith("pending")
 
 
 def is_manifested(provenance):
     """True iff the row's model prob is exactly replayable from a recorded lock
-    contract. A dirty code tree is never replayable from its sha, so it fails."""
-    if not provenance or provenance.get("code_dirty"):
+    contract: a known reconstruction mode, a CLEAN code tree (the dirty marker
+    must be present and False — a missing marker is unknown provenance), and
+    every replay-input hash the mode depends on present and resolved. As defense
+    in depth, a placeholder in ANY *_sha field the manifest carries also fails."""
+    if not provenance:
         return False
-    mode = provenance.get("reconstruction_mode")
-    if mode in _ADOPTION_MODES:
-        return bool(provenance.get("code_sha") and provenance.get("ratings_sha"))
-    if mode == "immutable_forecast":   # per-match prob logged at lock
-        return bool(provenance.get("code_sha"))
-    return False
+    if provenance.get("code_dirty") is not False:   # absent (unknown) or True (dirty)
+        return False
+    required = _REQUIRED_HASHES.get(provenance.get("reconstruction_mode"))
+    if not required:
+        return False
+    if not all(_resolved_hash(provenance.get(k)) for k in required):
+        return False
+    return all(_resolved_hash(v) for k, v in provenance.items()
+               if k.endswith("_sha"))
 
 
 def grade_match_row(a, b, winner, model_prob, close, *, market_prob=None,
