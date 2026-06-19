@@ -25,6 +25,9 @@ DATA = Path(__file__).resolve().parent.parent / "data"
 # holds the exact team order the locked fit + tables were generated under, so
 # this is byte-identical to the former in-code literal. Seeds 1-8 are the
 # Valve Global Standings invitees; 9-16 are seeded by Stage 2 Swiss + Buchholz.
+# W6 rebind caveat: other modules do `from model import STAGE3_TEAMS` (separate
+# bindings), so to replay a different event mutate this list IN PLACE
+# (STAGE3_TEAMS[:] = ...) — reassigning it here won't propagate to them.
 STAGE3_TEAMS = COLOGNE.teams
 
 # Prior means. Stage 3 teams: market-informed estimates (two GGbet BO3 lines +

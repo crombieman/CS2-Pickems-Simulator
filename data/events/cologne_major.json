@@ -1,5 +1,5 @@
 {
-  "_comment": "IEM Cologne Major 2026 — Stage 3 (16-team Valve Swiss). Event facts lifted from in-code literals (model.STAGE3_TEAMS, simulate.ROUND1/SEED, optimize scoring, playoffs format) by W5. teams order, round1 order, and seeds are REPRODUCIBILITY-CRITICAL: the locked v1-v3 tables + ratings_fitted.json were generated under exactly these — do not reorder. lock_timestamp left null pending the exact Stage-3 pick-lock UTC.",
+  "_comment": "IEM Cologne Major 2026 — Stage 3 (16-team Valve Swiss). Event facts lifted from in-code literals (model.STAGE3_TEAMS, simulate.ROUND1/SEED, optimize scoring, playoffs format) by W5. teams order, round1 order, and seeds are REPRODUCIBILITY-CRITICAL: the locked v1-v3 tables + ratings_fitted.json were generated under exactly these — do not reorder. lock_timestamp left null pending the exact Stage-3 pick-lock UTC. DESCRIPTIVE-ONLY fields (code still hardcodes the behavior they name; see event_config.EventConfig docstring): format.*, playoffs.teams/qf_format/sf_format, optimizer_objective, scoring.slate_size.",
   "event_id": "cologne_major_2026_stage3",
   "name": "IEM Cologne Major 2026 — Stage 3",
   "format": {

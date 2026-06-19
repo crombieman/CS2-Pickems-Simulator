@@ -5,8 +5,16 @@ The Cologne Stage-3 config (data/events/cologne_major.json) holds the EXACT
 team order, Round-1 pairings, and seeds the locked fit + probability tables
 were generated under, so sourcing them here is byte-identical to the former
 in-code literals (model.STAGE3_TEAMS, simulate.ROUND1/SEED). The modules bind
-their globals from COLOGNE; a future harness rebinds them per replayed event
-(the same global-rebind pattern test_invariants already uses for LEGACY_SEED).
+their globals from COLOGNE at import.
+
+Multi-event replay (W6) — propagation contract: several modules re-export the
+team list via `from model import STAGE3_TEAMS`, which creates INDEPENDENT name
+bindings. Reassigning model.STAGE3_TEAMS will NOT reach them. The only rebind
+that propagates cross-module is IN-PLACE mutation of the shared container
+(model.STAGE3_TEAMS *is* COLOGNE.teams — the same list object everywhere), e.g.
+`COLOGNE.teams[:] = new_teams`. This is unlike test_invariants' LEGACY_SEED
+swap, which works only because SEED is reassigned and consumed inside simulate's
+own module. See test_invariants.TestCrossModuleRebind for the pinned contract.
 
 See docs/plans/2026-06-17-engine-correctness-implementation.md, W5.
 """
@@ -26,7 +34,15 @@ _SCORING_KEYS = ("exact_3_0", "exact_0_3", "advance", "pass_threshold",
 class EventConfig:
     """One event's facts. `teams` (list), `round1` (list of (a, b) tuples) and
     `seeds` (dict) keep the exact types/orders of the former in-code literals
-    so downstream fits and simulations are byte-identical."""
+    so downstream fits and simulations are byte-identical.
+
+    Load-bearing today (code reads these): teams, round1, seeds, scoring,
+    playoffs["grand_final_bo5"]. DESCRIPTIVE-ONLY today — recorded for provenance
+    and the W6 multi-event harness, but the code still HARDCODES the behavior
+    they name, so a value here that disagrees with the code is silently ignored
+    until W6 wires them: format.*, playoffs["teams"/"qf_format"/"sf_format"],
+    optimizer_objective, scoring["slate_size"]. test_event_config pins these to
+    the hardcoded reality so an edit that would silently diverge fails loud."""
 
     event_id: str
     name: str
@@ -42,10 +58,14 @@ class EventConfig:
 
     @classmethod
     def from_dict(cls, d: dict) -> "EventConfig":
+        missing = [k for k in ("event_id", "name", "teams", "round1", "seeds",
+                               "scoring", "playoffs") if k not in d]
+        if missing:
+            raise ValueError(f"event config missing required key(s): {missing}")
         teams = list(d["teams"])
         round1 = [tuple(m) for m in d["round1"]]
         seeds = dict(d["seeds"])
-        _validate(teams, round1, seeds, d.get("scoring", {}))
+        _validate(teams, round1, seeds, dict(d["scoring"]))
         return cls(
             event_id=d["event_id"],
             name=d["name"],
@@ -96,6 +116,21 @@ def _validate(teams, round1, seeds, scoring):
     missing = [k for k in _SCORING_KEYS if k not in scoring]
     if missing:
         raise ValueError(f"scoring missing required key(s): {missing}")
+    # bool is an int subclass; reject it so a JSON true/false can't slip in.
+    bad = [k for k in _SCORING_KEYS
+           if not isinstance(scoring[k], int) or isinstance(scoring[k], bool)
+           or scoring[k] < 1]
+    if bad:
+        raise ValueError(f"scoring values must be positive ints: {bad}")
+    picks = scoring["exact_3_0"] + scoring["exact_0_3"] + scoring["advance"]
+    if scoring["slate_size"] != picks:
+        raise ValueError(
+            f"scoring slate_size ({scoring['slate_size']}) must equal the pick "
+            f"count exact_3_0+exact_0_3+advance ({picks})")
+    if scoring["pass_threshold"] > scoring["slate_size"]:
+        raise ValueError(
+            f"scoring pass_threshold ({scoring['pass_threshold']}) cannot exceed "
+            f"slate_size ({scoring['slate_size']})")
 
 
 def load_event(path) -> EventConfig:

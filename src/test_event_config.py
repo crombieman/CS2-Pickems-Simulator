@@ -111,6 +111,25 @@ class TestValidation(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "scoring"):
             self._cfg(scoring=bad)
 
+    def test_missing_top_level_key_rejected(self):
+        d = json.loads(json.dumps(self.BASE))
+        del d["playoffs"]
+        with self.assertRaisesRegex(ValueError, "missing required key"):
+            EventConfig.from_dict(d)
+
+    def test_scoring_non_positive_rejected(self):
+        with self.assertRaisesRegex(ValueError, "positive ints"):
+            self._cfg(scoring={**self.BASE["scoring"], "advance": 0})
+
+    def test_slate_size_inconsistent_rejected(self):
+        # 1 + 1 + 2 = 4, not 5.
+        with self.assertRaisesRegex(ValueError, "slate_size"):
+            self._cfg(scoring={**self.BASE["scoring"], "slate_size": 5})
+
+    def test_pass_threshold_over_slate_rejected(self):
+        with self.assertRaisesRegex(ValueError, "pass_threshold"):
+            self._cfg(scoring={**self.BASE["scoring"], "pass_threshold": 5})
+
 
 class TestLoadEvent(unittest.TestCase):
     def test_load_event_round_trips_cologne(self):
@@ -118,6 +137,23 @@ class TestLoadEvent(unittest.TestCase):
         cfg = load_event(EVENTS / "cologne_major.json")
         self.assertEqual(cfg.teams, LOCKED_TEAMS)
         self.assertEqual(cfg.event_id, COLOGNE.event_id)
+
+
+class TestDescriptiveFieldsPinnedToCode(unittest.TestCase):
+    """W5 finding B: format.*, playoffs["teams"], etc. are descriptive-only — the
+    code still HARDCODES the behavior they name. Pin them to the hardcoded
+    reality so a config edit that would silently diverge fails loud here, until
+    W6 actually wires them into the sim/playoff logic."""
+
+    def test_swiss_thresholds_match_simulate_hardcode(self):
+        # simulate.py hardcodes 'wins[t] < 3 and losses[t] < 3'.
+        self.assertEqual(COLOGNE.format["wins_to_advance"], 3)
+        self.assertEqual(COLOGNE.format["losses_to_eliminate"], 3)
+
+    def test_playoff_bracket_size_matches_playoffs_hardcode(self):
+        # playoffs.py hardcodes the 8-team bracket: select_playoff_teams requires
+        # exactly 8 qualified and quarterfinals indexes seeds[0..7].
+        self.assertEqual(COLOGNE.playoffs["teams"], 8)
 
 
 if __name__ == "__main__":

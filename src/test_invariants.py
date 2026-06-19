@@ -180,5 +180,32 @@ class TestEventConfigWiring(unittest.TestCase):
         self.assertEqual(optimize.PASS_THRESHOLD, s["pass_threshold"])
 
 
+class TestCrossModuleRebind(unittest.TestCase):
+    """W5 finding A: the W6 multi-event harness must rebind event facts by
+    IN-PLACE mutation of the shared container, NOT reassignment. Modules that did
+    `from model import STAGE3_TEAMS` hold independent bindings a reassignment
+    won't reach; only in-place mutation of the shared list propagates. Pin that
+    contract so a future harness (or a refactor) can't quietly break it."""
+
+    def test_reassignment_does_not_propagate_but_inplace_does(self):
+        import model
+        import simulate
+        original = list(model.STAGE3_TEAMS)
+        # model and simulate alias the SAME list object today.
+        self.assertIs(model.STAGE3_TEAMS, simulate.STAGE3_TEAMS)
+        try:
+            # Reassigning the model global does NOT reach simulate's binding.
+            model.STAGE3_TEAMS = ["X", "Y"]
+            self.assertEqual(simulate.STAGE3_TEAMS, original)
+            self.assertNotEqual(simulate.STAGE3_TEAMS, model.STAGE3_TEAMS)
+            # In-place mutation of the shared list DOES propagate cross-module.
+            model.STAGE3_TEAMS = simulate.STAGE3_TEAMS   # restore the alias
+            model.STAGE3_TEAMS[:] = ["X", "Y"]
+            self.assertEqual(simulate.STAGE3_TEAMS, ["X", "Y"])
+        finally:
+            model.STAGE3_TEAMS[:] = original
+        self.assertEqual(simulate.STAGE3_TEAMS, original)
+
+
 if __name__ == "__main__":
     unittest.main()
