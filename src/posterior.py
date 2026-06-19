@@ -109,6 +109,83 @@ def rating_draws(k=K_SAMPLES, seed=SEED, lam=ANCHOR_LAMBDA, factor=None):
     return draws
 
 
+# -- W15 / U1: structural envelope + E.3 published intervals ------------------
+# Three uncertainty sources fold into ONE honest interval (roadmap E.3):
+#   (1) MC error    -- finite sims (~+/-0.003 at M_SIMS); a floor half-width.
+#   (2) parameter   -- Laplace posterior draws (rating_draws, above).
+#   (3) structural  -- model-shape choices we can't pin from data: the anchor-
+#                      propagation weight lambda and the recency/format weighting.
+#                      Swept over a small grid; the spread is the structural range.
+# The published interval ENVELOPES (1)-(3) rather than adding variances in
+# quadrature: structural spread is not a Gaussian sd, so a union is the honest,
+# conservative statement (matches this module's "conservative in width" ethos).
+
+LAMBDAS_STRUCT = (0.3, 0.5, 0.7)   # anchor-propagation sweep (ANCHOR_LAMBDA=0.5)
+WEIGHT_SCALES = (0.7, 1.0, 1.3)    # recency/format sharpness sweep (1.0 = as-fit)
+MC_FLOOR = 0.003                   # min interval half-width: finite-sim noise
+
+
+def perturb_weights(matches, scale):
+    """Re-weight matches to sweep recency/format sharpness (the structural recency
+    axis; recency lives in the CSV weight column, not a runtime knob). scale=1.0
+    leaves weights untouched; scale<1 flattens them toward 1.0 (less recency/format
+    emphasis), scale>1 sharpens. w' = 1 - scale*(1 - w), clamped positive."""
+    return [(w, l, max(1e-6, 1.0 - scale * (1.0 - wt))) for w, l, wt in matches]
+
+
+def slate_point(anchored, rng, m_sims):
+    """Point estimates from m_sims at fixed anchored ratings:
+    (p_pass, {team: {"p30","padv","p03"}}). One structural-grid corner."""
+    passes = 0
+    counts = {t: {"p30": 0, "padv": 0, "p03": 0} for t in STAGE3_TEAMS}
+    for _ in range(m_sims):
+        result = simulate_stage(anchored, rng)
+        passes += slate_ticks(result) >= 5
+        for t, rec in result.items():
+            if rec == (3, 0):
+                counts[t]["p30"] += 1
+            elif rec in ((3, 1), (3, 2)):
+                counts[t]["padv"] += 1
+            elif rec == (0, 3):
+                counts[t]["p03"] += 1
+    per_team = {t: {c: counts[t][c] / m_sims for c in ("p30", "padv", "p03")}
+                for t in STAGE3_TEAMS}
+    return passes / m_sims, per_team
+
+
+def structural_points(seed=SEED, m_sims=M_SIMS, lambdas=LAMBDAS_STRUCT,
+                      scales=WEIGHT_SCALES):
+    """Point estimate of every slate quantity at each (weight_scale, lambda)
+    corner. Re-fits per weight scale (recency moves the MAP), re-anchors per
+    lambda (cheap). Returns a list of (p_pass, per_team) over the grid."""
+    base_matches = load_matches()
+    pts = []
+    for scale in scales:
+        matches = (base_matches if scale == 1.0
+                   else perturb_weights(base_matches, scale))
+        map_ratings = fit_bradley_terry(matches)
+        for lam in lambdas:
+            anchored = apply_market_anchors(dict(map_ratings), lam=lam)
+            pts.append(slate_point(anchored, random.Random(seed), m_sims))
+    return pts
+
+
+def published_interval(point, param_lo, param_hi, structural_vals,
+                       mc_floor=MC_FLOOR):
+    """E.3 interval for one quantity: envelope of the parameter interval
+    (param_lo..param_hi, already carrying MC noise), the structural spread
+    (corner values), and a minimum MC half-width. Clamped to [0, 1]."""
+    lo = min([param_lo, point - mc_floor] + structural_vals)
+    hi = max([param_hi, point + mc_floor] + structural_vals)
+    return max(0.0, lo), min(1.0, hi)
+
+
+def fmt_interval(point, lo, hi):
+    """E.3 display form, e.g. '0.42 [0.37-0.45]' — two decimals; three would
+    overstate what we know by an order of magnitude (roadmap E.3)."""
+    return f"{point:.2f} [{lo:.2f}-{hi:.2f}]"
+
+
 def main():
     map_ratings, teams, L = laplace_factor()
     rng = random.Random(SEED)
@@ -174,6 +251,28 @@ def main():
         for c in ("p30", "padv", "p03"):
             xs = sorted(per_sample_team[t][c])
             row += (f" {pooled[t][c]:7.3f} [{pct(xs, 0.05):.3f}-{pct(xs, 0.95):.3f}]")
+        print(row)
+
+    # -- W15 / U1: E.3 published intervals (parameter + structural + MC) -------
+    n_corners = len(WEIGHT_SCALES) * len(LAMBDAS_STRUCT)
+    print(f"\nStructural envelope: {len(WEIGHT_SCALES)} recency scales x "
+          f"{len(LAMBDAS_STRUCT)} lambda = {n_corners} corners (re-fit per scale)...")
+    struct = structural_points()
+    p_point = pooled_pass / n_total
+    lo, hi = published_interval(p_point, pct(p5_sorted, 0.05),
+                               pct(p5_sorted, 0.95), [pt[0] for pt in struct])
+    print("\nE.3 published intervals (parameter + structural + MC, enveloped):")
+    print(f"  P(>=5 correct) = {fmt_interval(p_point, lo, hi)}")
+    print(f"\n  {'Team':12s} {'P(3-0)':>16s} {'P(adv)':>16s} {'P(0-3)':>16s}")
+    for t in sorted(STAGE3_TEAMS,
+                    key=lambda t: -(pooled[t]["p30"] + pooled[t]["padv"])):
+        row = f"  {t:12s}"
+        for c in ("p30", "padv", "p03"):
+            xs = sorted(per_sample_team[t][c])
+            sv = [pt[1][t][c] for pt in struct]
+            clo, chi = published_interval(pooled[t][c], pct(xs, 0.05),
+                                          pct(xs, 0.95), sv)
+            row += f" {fmt_interval(pooled[t][c], clo, chi):>16s}"
         print(row)
 
 
