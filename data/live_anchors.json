@@ -1,26 +1,19 @@
 {
-  "comment": "Polymarket gamma mids, fetched 2026-06-19T10:58:13+00:00; normalized two-sided; consumed by live.py as pair overrides.",
+  "comment": "Polymarket gamma mids, fetched 2026-06-19T15:43:37+00:00; normalized two-sided; consumed by live.py as pair overrides.",
   "anchors": [
     {
       "a": "Spirit",
       "b": "G2",
-      "p": 0.755,
+      "p": 0.645,
       "slug": "cs2-ts7-g2-2026-06-19",
-      "volume": 775150
+      "volume": 3049045
     },
     {
       "a": "Vitality",
       "b": "Falcons",
-      "p": 0.705,
+      "p": 0.695,
       "slug": "cs2-vit-fal2-2026-06-19",
-      "volume": 405840
-    },
-    {
-      "a": "Aurora",
-      "b": "FURIA",
-      "p": 0.425,
-      "slug": "cs2-aur1-furia-2026-06-20",
-      "volume": 27609
+      "volume": 560334
     }
   ]
 }
