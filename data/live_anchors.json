@@ -1,12 +1,12 @@
 {
-  "comment": "Polymarket gamma mids, fetched 2026-06-20T17:49:07+00:00; normalized two-sided; consumed by live.py as pair overrides.",
+  "comment": "Polymarket gamma mids, fetched 2026-06-20T19:58:16+00:00; normalized two-sided; consumed by live.py as pair overrides.",
   "anchors": [
     {
       "a": "Spirit",
       "b": "Falcons",
-      "p": 0.675,
+      "p": 0.655,
       "slug": "cs2-ts7-fal2-2026-06-20",
-      "volume": 1700399
+      "volume": 4129010
     }
   ]
 }
