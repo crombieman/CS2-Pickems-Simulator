@@ -54,6 +54,19 @@ COLOGNE_SNAPSHOT = {
                     ("v3", "stage3_probs.json")],
 }
 
+# Playoff bracket (Champions stage). ratings_fitted.json is the living file,
+# but it is byte-identical to the lock-time fit: no fit-touching change landed
+# between the R5 refit (the fit playoffs.py ran on at lock) and grading — held
+# by the CI reproducibility gate and verified 2026-07-01. No per-team tables:
+# the p30/padv/p03 stage-outcome object is Swiss-specific.
+COLOGNE_PLAYOFFS_SNAPSHOT = {
+    "event": "cologne-playoffs",
+    "matches_file": "results_matches_playoffs.json",
+    "ratings_file": "ratings_fitted.json",
+    "anchors_file": "playoff_anchors.json",
+    "archive_file": "odds_archive.jsonl",
+}
+
 
 # -- scoring primitives ------------------------------------------------------
 def _brier(p, y):
@@ -296,6 +309,55 @@ def grade_event(event, matches, ratings, overrides, archive, match_provenance,
     return rows
 
 
+def grade_playoff_matches(matches, ratings, overrides, archive, event,
+                          model_version, provenance):
+    """kind:"match" rows for the playoff bracket, reconstructing the LOCK-TIME
+    model probs via the same code path playoffs.py used at lock (make_prob_fn):
+    anchored pairs take the market prob verbatim, unpriced BO3 = win_prob on
+    the lock ratings, and the BO5 grand final converts via series_prob_bo5.
+    Pure given its inputs -> the unit of re-gradeability."""
+    from market_close import close_row
+    from playoffs import make_prob_fn
+    prob = make_prob_fn(ratings, overrides)
+    rows = []
+    for m in matches:
+        a, b = m["a"], m["b"]
+        model_prob = prob(a, b, bo5=(m.get("bo") == 5))
+        row = grade_match_row(a, b, m["winner"], model_prob,
+                              close_row(archive, a, b, m["start"]),
+                              market_prob=overrides.get((a, b)),
+                              provenance=provenance)
+        row["event"] = event
+        row["model_version"] = model_version
+        row["round"] = m.get("round")
+        rows.append(row)
+    return rows
+
+
+def regrade_playoffs_from_snapshot(snapshot=None):
+    """Playoff analog of regrade_from_snapshot: load the immutable lock inputs
+    (announced-bracket results, lock ratings, lock QF anchors, odds archive),
+    stamp backfill_reconstructed provenance, and grade. Read-only."""
+    snap = snapshot or COLOGNE_PLAYOFFS_SNAPSHOT
+    from playoffs import load_playoff_overrides
+    archive = load_log(DATA / snap["archive_file"])
+    matches = json.load(open(DATA / snap["matches_file"]))["matches"]
+    ratings = json.load(open(DATA / snap["ratings_file"]))
+    overrides = load_playoff_overrides(DATA / snap["anchors_file"])
+    prov = {
+        "grade_version": GRADE_VERSION, "code_sha": _git_sha(),
+        "code_dirty": _src_dirty(),
+        "reconstruction_mode": "backfill_reconstructed",
+        "ratings_source": snap["ratings_file"],
+        "ratings_sha": _sha(DATA / snap["ratings_file"]),
+        "anchors_source": snap["anchors_file"],
+        "anchors_sha": _sha(DATA / snap["anchors_file"]),
+        "pair_overrides_version": f"load_playoff_overrides@{snap['anchors_file']}",
+    }
+    return grade_playoff_matches(matches, ratings, overrides, archive,
+                                 snap["event"], "playoff-lock", prov)
+
+
 def regrade_from_snapshot(snapshot=None):
     """Load the immutable inputs named in the snapshot, stamp provenance with
     their current hashes + code state, and grade. Deterministic: identical inputs
@@ -332,17 +394,24 @@ def regrade_from_snapshot(snapshot=None):
                        match_prov, team_tables, results)
 
 
+EVENTS = {
+    "cologne-stage3": regrade_from_snapshot,
+    "cologne-playoffs": regrade_playoffs_from_snapshot,
+}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--grade-event", default="cologne-stage3",
-                    help="event id to (re)grade; only cologne-stage3 wired today")
+                    help=f"event id to (re)grade; wired: {', '.join(EVENTS)}")
     ap.add_argument("--include-flagged", action="store_true",
                     help="include in-play-fallback closes in the summary")
     ap.add_argument("--force", action="store_true",
                     help="append a superseding re-grade even if already logged")
     args = ap.parse_args()
-    if args.grade_event != "cologne-stage3":
-        raise SystemExit(f"only cologne-stage3 is wired (got {args.grade_event})")
+    if args.grade_event not in EVENTS:
+        raise SystemExit(f"unknown event {args.grade_event!r}; "
+                         f"wired: {', '.join(EVENTS)}")
 
     already = args.grade_event in {r.get("event") for r in load_log(GRADED_LOG)}
     if already and not args.force:
@@ -350,12 +419,13 @@ def main():
             f"{args.grade_event} already in {GRADED_LOG.name}; re-running would "
             f"append duplicates. Use --force for a superseding re-grade.")
 
-    rows = regrade_from_snapshot()
+    rows = EVENTS[args.grade_event]()
     append_log(rows, GRADED_LOG)
     match_rows = [r for r in rows if r["kind"] == "match"]
     s = summarize(rows, include_flagged=args.include_flagged)        # adoption view
     xc = summarize(rows, require_manifest=False)                     # cross-check view
-    print(f"Graded {len(match_rows)} matches (v3 lock) + "
+    version = match_rows[0]["model_version"] if match_rows else "?"
+    print(f"Graded {len(match_rows)} matches ({version}) + "
           f"{len(rows) - len(match_rows)} team rows -> {GRADED_LOG.name}")
     print(f"  adoption-eligible matches: {s['eligible_n']}  "
           f"(flagged {s['excluded_flagged_n']}, unmanifested {s['excluded_unmanifested_n']})")

@@ -1,0 +1,12 @@
+{
+  "comment": "Cologne playoff (Champions stage) results. a/b = bo3.gg team1/team2 orientation; winner two-source verified (bo3.gg archive tid 4209 stage 9713 + Liquipedia final standings: Falcons champion, FURIA runner-up, Spirit/Aurora 3rd-4th); start = bo3.gg scheduled start, UTC. QF/SF are BO3, grand final BO5 (bo field). Consumed by calibration.py (cologne-playoffs) + postmortem_playoffs.py.",
+  "matches": [
+    {"a": "Aurora", "b": "BetBoom", "winner": "Aurora", "start": "2026-06-18T13:45:00+00:00", "round": "QF", "bo": 3},
+    {"a": "FURIA", "b": "9z", "winner": "FURIA", "start": "2026-06-18T17:00:00+00:00", "round": "QF", "bo": 3},
+    {"a": "Spirit", "b": "G2", "winner": "Spirit", "start": "2026-06-19T13:45:00+00:00", "round": "QF", "bo": 3},
+    {"a": "Vitality", "b": "Falcons", "winner": "Falcons", "start": "2026-06-19T19:25:00+00:00", "round": "QF", "bo": 3},
+    {"a": "FURIA", "b": "Aurora", "winner": "FURIA", "start": "2026-06-20T13:45:00+00:00", "round": "SF", "bo": 3},
+    {"a": "Falcons", "b": "Spirit", "winner": "Falcons", "start": "2026-06-20T17:00:00+00:00", "round": "SF", "bo": 3},
+    {"a": "FURIA", "b": "Falcons", "winner": "Falcons", "start": "2026-06-21T15:00:00+00:00", "round": "GF", "bo": 5}
+  ]
+}

@@ -13,8 +13,10 @@ import tempfile
 import unittest
 
 from calibration import (grade_match_row, grade_team_row, grade_team_table,
-                         grade_event, regrade_from_snapshot, append_log,
-                         load_log, load_latest, summarize, is_manifested)
+                         grade_event, grade_playoff_matches,
+                         regrade_from_snapshot, regrade_playoffs_from_snapshot,
+                         append_log, load_log, load_latest, summarize,
+                         is_manifested)
 
 CLOSE = {"p_a": 0.60, "flagged": False, "close_rule": "v1:test",
          "ts": "2026-06-11T08:00:00+00:00", "slug": "m1", "volume": 5000.0}
@@ -209,6 +211,62 @@ class TestRegradeFromSnapshot(unittest.TestCase):   # P2
     def test_grade_event_is_pure(self):
         rows = grade_event("ev", [], {}, {}, [], MANIFEST, [], {})
         self.assertEqual(rows, [])
+
+
+class TestGradePlayoffMatches(unittest.TestCase):
+    """The playoff model prob must reconstruct the LOCK-TIME code path:
+    anchor verbatim for priced pairs, win_prob for unpriced BO3, and the
+    series_prob_bo5 conversion for the BO5 grand final."""
+    RATINGS = {"A": 1600.0, "B": 1500.0, "C": 1400.0, "D": 1300.0}
+    OVERRIDES = {("A", "B"): 0.7, ("B", "A"): 0.3}
+    MATCHES = [
+        {"a": "A", "b": "B", "winner": "A",
+         "start": "2026-06-18T13:45:00+00:00", "round": "QF", "bo": 3},
+        {"a": "A", "b": "C", "winner": "A",
+         "start": "2026-06-20T13:45:00+00:00", "round": "SF", "bo": 3},
+        {"a": "A", "b": "D", "winner": "D",
+         "start": "2026-06-21T15:00:00+00:00", "round": "GF", "bo": 5},
+    ]
+
+    def _rows(self):
+        return grade_playoff_matches(self.MATCHES, self.RATINGS, self.OVERRIDES,
+                                     [], "ev-playoffs", "playoff-lock", MANIFEST)
+
+    def test_anchored_qf_uses_market_prob_verbatim(self):
+        qf = self._rows()[0]
+        self.assertAlmostEqual(qf["model_prob"], 0.7)
+        self.assertAlmostEqual(qf["market_prob"], 0.7)
+
+    def test_unpriced_sf_uses_win_prob(self):
+        from model import win_prob
+        sf = self._rows()[1]
+        self.assertAlmostEqual(sf["model_prob"], win_prob(self.RATINGS, "A", "C"))
+        self.assertIsNone(sf["market_prob"])
+
+    def test_bo5_final_converts_series_prob(self):
+        from model import win_prob
+        from playoffs import series_prob_bo5
+        gf = self._rows()[2]
+        p3 = win_prob(self.RATINGS, "A", "D")
+        self.assertAlmostEqual(gf["model_prob"], series_prob_bo5(p3))
+        self.assertGreater(gf["model_prob"], p3)   # favorite gains in BO5
+
+    def test_rows_stamped_with_event_version_round(self):
+        rows = self._rows()
+        self.assertEqual([r["round"] for r in rows], ["QF", "SF", "GF"])
+        self.assertTrue(all(r["event"] == "ev-playoffs" for r in rows))
+        self.assertTrue(all(r["model_version"] == "playoff-lock" for r in rows))
+
+    def test_no_close_is_not_adoption_eligible(self):
+        # empty archive -> no close -> logged but never gate evidence.
+        self.assertTrue(all(not r["adoption_eligible"] for r in self._rows()))
+
+    def test_snapshot_regrade_covers_full_bracket_and_reproduces(self):
+        rows = regrade_playoffs_from_snapshot()
+        self.assertEqual(len(rows), 7)                        # 4 QF + 2 SF + GF
+        self.assertEqual([r["round"] for r in rows],
+                         ["QF", "QF", "QF", "QF", "SF", "SF", "GF"])
+        self.assertEqual(rows, regrade_playoffs_from_snapshot())
 
 
 if __name__ == "__main__":
