@@ -7,3 +7,6 @@ tasks/
 
 __pycache__/
 *.pyc
+
+# living scratch output of optimize.py (frozen locks live in stage3_probs*.json)
+data/stage3_probs_live.json
