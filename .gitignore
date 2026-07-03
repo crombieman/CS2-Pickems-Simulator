@@ -10,3 +10,6 @@ __pycache__/
 
 # living scratch output of optimize.py (frozen locks live in stage3_probs*.json)
 data/stage3_probs_live.json
+
+# derived D1 substrate — rebuild with `python src/bo3gg_parse.py --rebuild`
+data/bo3gg/parsed.sqlite

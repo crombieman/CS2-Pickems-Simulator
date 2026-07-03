@@ -1,0 +1,21 @@
+{
+  "comment": "Canonical model-team names -> bo3.gg team ids (W3 child spec 4). Two-source: full-archive census 2026-07-01 (names) + Cologne tid-4209 match rows (ids; teams verified playing the event we modeled). ONE id per canonical - an org-id change across eras is an explicit row replacement here (history = this file's git log). Grown per-event, never guessed.",
+  "aliases": [
+    {"canonical": "9z", "team_id": 324, "bo3gg_name": "9z", "source": "stage3-seed"},
+    {"canonical": "Aurora", "team_id": 3598, "bo3gg_name": "Aurora", "source": "stage3-seed"},
+    {"canonical": "B8", "team_id": 1539, "bo3gg_name": "B8", "source": "stage3-seed"},
+    {"canonical": "BetBoom", "team_id": 7498, "bo3gg_name": "BetBoom", "source": "stage3-seed"},
+    {"canonical": "FURIA", "team_id": 648, "bo3gg_name": "FURIA", "source": "stage3-seed"},
+    {"canonical": "FUT", "team_id": 20832, "bo3gg_name": "FUT", "source": "stage3-seed"},
+    {"canonical": "Falcons", "team_id": 2713, "bo3gg_name": "Falcons", "source": "stage3-seed"},
+    {"canonical": "G2", "team_id": 793, "bo3gg_name": "G2", "source": "stage3-seed"},
+    {"canonical": "Legacy", "team_id": 8118, "bo3gg_name": "Legacy", "source": "stage3-seed"},
+    {"canonical": "MOUZ", "team_id": 765, "bo3gg_name": "MOUZ", "source": "stage3-seed"},
+    {"canonical": "MongolZ", "team_id": 736, "bo3gg_name": "The MongolZ", "source": "stage3-seed"},
+    {"canonical": "Monte", "team_id": 3581, "bo3gg_name": "Monte", "source": "stage3-seed"},
+    {"canonical": "NAVI", "team_id": 787, "bo3gg_name": "Natus Vincere", "source": "stage3-seed"},
+    {"canonical": "PARIVISION", "team_id": 8171, "bo3gg_name": "PARIVISION", "source": "stage3-seed"},
+    {"canonical": "Spirit", "team_id": 654, "bo3gg_name": "Spirit", "source": "stage3-seed"},
+    {"canonical": "Vitality", "team_id": 667, "bo3gg_name": "Vitality", "source": "stage3-seed"}
+  ]
+}
