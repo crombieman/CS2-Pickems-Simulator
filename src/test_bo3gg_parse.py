@@ -12,7 +12,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from bo3gg_parse import (PARSE_VERSION, build_db, iter_archive_rows,
+from bo3gg_parse import (PARSE_VERSION, TOURNAMENT_KEYS, build_db,
+                         fetch_tournaments, iter_archive_rows,
+                         latest_complete_snapshot, parse_tournaments,
                          reconcile, validate_row)
 
 
@@ -286,6 +288,153 @@ class TestBuildAndReconcile(unittest.TestCase):
         ok, failures = reconcile(report, db_path=db, data_dir=fx.dir)
         self.assertFalse(ok)                      # 11/51 quarantined >> 2%
         self.assertTrue(any("rate" in f for f in failures))
+
+
+def tournament(tid, name="Event", **over):
+    t = {"id": tid, "name": name, "slug": f"e{tid}",
+         "short_name": name[:4] if name else None,
+         "start_date": "2026-01-01T00:00:00+00:00",
+         "end_date": "2026-01-05T00:00:00+00:00", "tier": "s", "tier_rank": 1,
+         "region_id": 1, "country_id": 2, "event_type": "lan",
+         "event_scope": "international", "event_level": "major",
+         "prize": 1000, "status": "finished", "pickem_presence": True}
+    t.update(over)
+    return t
+
+
+def write_snapshot(path, sid, pages, totals=None):
+    """Append one (possibly torn) snapshot: pages = list of row-lists."""
+    n_before = 0
+    with gzip.open(path, "at") as f:
+        for i, rows in enumerate(pages):
+            total = totals[i] if totals else sum(len(p) for p in pages)
+            f.write(json.dumps({
+                "snapshot_id": sid, "fetched_at": sid, "url": "fixture",
+                "offset": n_before,
+                "body": json.dumps({"total": {"count": total},
+                                    "results": rows})}) + "\n")
+            n_before += len(rows)
+
+
+class TestTournamentsSnapshot(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self._tmp.name)
+        self.snaps = self.dir / "tournaments_snapshots.jsonl.gz"
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_fetch_writes_complete_snapshot(self):
+        rows = [tournament(i) for i in range(1, 6)]
+        bodies = {0: json.dumps({"total": {"count": 5}, "results": rows[:3]}),
+                  3: json.dumps({"total": {"count": 5}, "results": rows[3:]})}
+        sid = fetch_tournaments(path=self.snaps,
+                                fetch=lambda o: bodies[o],
+                                sleep=lambda s: None, snapshot_id="S1")
+        self.assertEqual(sid, "S1")
+        got_sid, got = latest_complete_snapshot(self.snaps)
+        self.assertEqual(got_sid, "S1")
+        self.assertEqual([t["id"] for t in got], [1, 2, 3, 4, 5])
+
+    def test_fetch_aborts_on_total_instability(self):
+        bodies = {0: json.dumps({"total": {"count": 5},
+                                 "results": [tournament(1)] * 3}),
+                  3: json.dumps({"total": {"count": 6},   # shifted mid-fetch
+                                 "results": [tournament(4)] * 2})}
+        with self.assertRaises(ValueError):
+            fetch_tournaments(path=self.snaps, fetch=lambda o: bodies[o],
+                              sleep=lambda s: None, snapshot_id="S1")
+
+    def test_latest_complete_wins_and_torn_tail_skipped(self):
+        write_snapshot(self.snaps, "S1", [[tournament(1, name="OldRun")]])
+        write_snapshot(self.snaps, "S2",
+                       [[tournament(1, name="NewRun"), tournament(2)]])
+        # S3 is torn: claims 5 rows, delivers 2 (crash after page 1)
+        write_snapshot(self.snaps, "S3", [[tournament(1), tournament(2)]],
+                       totals=[5])
+        sid, rows = latest_complete_snapshot(self.snaps)
+        self.assertEqual(sid, "S2")
+        self.assertEqual(rows[0]["name"], "NewRun")
+
+    def test_total_instability_within_snapshot_rejected_at_parse(self):
+        write_snapshot(self.snaps, "S1",
+                       [[tournament(1)], [tournament(2)]], totals=[2, 3])
+        sid, rows = latest_complete_snapshot(self.snaps)
+        self.assertIsNone(sid)
+
+
+class TestParseTournaments(unittest.TestCase):
+    def setUp(self):
+        self._fx = build_fixture()          # matches fixture -> db
+        self.dir = self._fx.dir
+        self.db = self.dir / "t.sqlite"
+        build_db(db_path=self.db, data_dir=self.dir,
+                 canonical_path=self._fx.canonical())
+        self.snaps = self.dir / "tournaments_snapshots.jsonl.gz"
+        self.wl = self.dir / "whitelist.json"
+
+    def _parse(self):
+        return parse_tournaments(db_path=self.db, snapshots_path=self.snaps,
+                                 whitelist_path=self.wl)
+
+    def test_parse_loads_and_join_check_passes(self):
+        # fixture matches all reference tournament_id=500
+        write_snapshot(self.snaps, "S1", [[tournament(500)]])
+        r = self._parse()
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["tournaments_n"], 1)
+        con = sqlite3.connect(self.db)
+        self.assertEqual(con.execute(
+            "SELECT name FROM tournaments WHERE tournament_id=500"
+        ).fetchone()[0], "Event")
+        self.assertEqual(con.execute(
+            "SELECT value FROM parse_meta WHERE key='tournaments_snapshot_id'"
+        ).fetchone()[0], "S1")
+        con.close()
+
+    def test_missing_id_fails_without_whitelist(self):
+        # snapshot NEWER than all match fetches, without tid 500 -> deleted
+        write_snapshot(self.snaps, "2026-06-30T00:00:00+00:00",
+                       [[tournament(9)]])
+        r = self._parse()
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["failing_ids"], [500])
+
+    def test_whitelist_skips_but_reports(self):
+        write_snapshot(self.snaps, "2026-06-30T00:00:00+00:00",
+                       [[tournament(9)]])
+        self.wl.write_text(json.dumps({"whitelist": [
+            {"id": 500, "evidence": "test", "date": "2026-07-02"}]}))
+        r = self._parse()
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["whitelisted_ids"], [500])
+
+    def test_stale_snapshot_reports_not_fails(self):
+        # snapshot OLDER than the matches' fetched_at -> stale, not deleted
+        write_snapshot(self.snaps, "2026-01-01T00:00:00+00:00",
+                       [[tournament(9)]])
+        r = self._parse()
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["stale_ids"], [500])
+        self.assertEqual(r["failing_ids"], [])
+
+    def test_null_name_reported_not_raised(self):
+        write_snapshot(self.snaps, "S1",
+                       [[tournament(500, name=None)]])
+        r = self._parse()
+        self.assertEqual(r["null_names"], 1)   # no IntegrityError
+
+    def test_missing_contract_key_raises(self):
+        bad = tournament(500)
+        del bad["region_id"]
+        write_snapshot(self.snaps, "S1", [[bad]])
+        with self.assertRaises(ValueError):
+            self._parse()
+
+    def test_tournament_keys_match_probe(self):
+        self.assertIn("pickem_presence", TOURNAMENT_KEYS)
+        self.assertIn("region_id", TOURNAMENT_KEYS)
 
 
 if __name__ == "__main__":

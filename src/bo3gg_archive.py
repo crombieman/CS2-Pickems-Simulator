@@ -45,12 +45,31 @@ PAGES_PER_CHUNK = 50
 MIN_DELAY = 1.5
 
 
-def http_fetch(offset, limit=LIMIT):
-    url = BASE.format(limit=limit, offset=offset)
+def http_get(url):
+    """Bare polite GET (headers + timeout). Shared with the W3c tournaments
+    slice in bo3gg_parse.py — extracted, not duplicated."""
     req = urllib.request.Request(url, headers={
         "Accept": "application/json", "User-Agent": "curl/8.4.0"})
     with urllib.request.urlopen(req, timeout=30) as resp:
         return resp.read().decode("utf-8")
+
+
+def http_fetch(offset, limit=LIMIT):
+    return http_get(BASE.format(limit=limit, offset=offset))
+
+
+def with_retries(call, *, sleep=time.sleep, max_tries=5, label=""):
+    """Run call() with exponential backoff on OSError (shared retry policy)."""
+    for attempt in range(1, max_tries + 1):
+        try:
+            return call()
+        except OSError as e:
+            if attempt == max_tries:
+                raise
+            wait = min(60.0, 2.0 ** attempt)
+            print(f"  fetch {label} failed ({e}); "
+                  f"retry {attempt}/{max_tries - 1} in {wait:.0f}s")
+            sleep(wait)
 
 
 class Archiver:
@@ -82,16 +101,9 @@ class Archiver:
 
     # -- fetch with retries --------------------------------------------
     def _fetch_with_retries(self, offset):
-        for attempt in range(1, self.max_tries + 1):
-            try:
-                return self.fetch(offset, LIMIT)
-            except OSError as e:
-                if attempt == self.max_tries:
-                    raise
-                wait = min(60.0, 2.0 ** attempt)
-                print(f"  fetch offset={offset} failed ({e}); "
-                      f"retry {attempt}/{self.max_tries - 1} in {wait:.0f}s")
-                self.sleep(wait)
+        return with_retries(lambda: self.fetch(offset, LIMIT),
+                            sleep=self.sleep, max_tries=self.max_tries,
+                            label=f"offset={offset}")
 
     @staticmethod
     def _parse_page(body):

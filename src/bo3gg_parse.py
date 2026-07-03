@@ -30,16 +30,28 @@ still reads matches_2026.csv until W8 clears V1):
 import argparse
 import gzip
 import json
+import random
 import sqlite3
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
-from bo3gg_archive import verify_archive
+from bo3gg_archive import MIN_DELAY, http_get, verify_archive, with_retries
 
 REPO = Path(__file__).resolve().parent.parent
 DATA = REPO / "data"
 ARCHIVE_DIR = DATA / "bo3gg"
 DB_PATH = ARCHIVE_DIR / "parsed.sqlite"
 CANONICAL_TEAMS = DATA / "canonical_teams.json"
+SNAPSHOTS_PATH = ARCHIVE_DIR / "tournaments_snapshots.jsonl.gz"
+TOURNAMENT_WHITELIST = DATA / "tournament_id_whitelist.json"
+
+# sort=id is load-bearing (spec 7 W3c): the sort key must be IMMUTABLE, or a
+# mid-snapshot edit to a mutable field (start_date...) can move a row across
+# the fetch frontier and vanish while every count check passes.
+TOURNAMENTS_BASE = ("https://api.bo3.gg/api/v1/tournaments"
+                    "?sort=id&page%5Blimit%5D={limit}&page%5Boffset%5D={offset}")
+TOURNAMENTS_LIMIT = 100
 
 PARSE_VERSION = "v1:census-2026-07-01+quarantine-6rules"
 
@@ -54,6 +66,15 @@ REQUIRED_KEYS = ("id", "slug", "start_date", "end_date", "bo_type",
                  "team1_score", "team2_score", "winner_team_id", "tier",
                  "tournament_id", "stage_id", "round_id", "maps_score",
                  "status", "parsed_status")
+
+# Tournament row contract: the DDL-consumed fields, existence probe-verified
+# 2026-07-02 and pinned operationally by the first full snapshot (a miss on
+# any row raises = contract drift caught at first contact). Values may be
+# NULL (reported, never IntegrityError - the matches NOT-NULL lesson).
+TOURNAMENT_KEYS = ("id", "name", "slug", "short_name", "start_date",
+                   "end_date", "tier", "tier_rank", "region_id", "country_id",
+                   "event_type", "event_scope", "event_level", "prize",
+                   "status", "pickem_presence")
 
 SCHEMA = """
 CREATE TABLE matches (
@@ -312,26 +333,196 @@ def reconcile(report, db_path=DB_PATH, data_dir=ARCHIVE_DIR):
     return ok, failures
 
 
+# -- W3c: tournaments slice (snapshot-refetch; spec 7 W3c) ---------------------
+def fetch_tournaments(path=SNAPSHOTS_PATH, fetch=None, sleep=time.sleep,
+                      snapshot_id=None):
+    """One full snapshot of /tournaments appended verbatim to the raw archive.
+
+    Snapshot-refetch, NOT a cursor: tournament rows are mutable (status,
+    dates, prize), and a cursor archive of mutable rows freezes stale states.
+    Every line carries snapshot_id so parse can delimit snapshots; total
+    stability is enforced during the fetch AND re-derived at parse time (a
+    crash here leaves a torn snapshot that parse skips loudly)."""
+    fetch = fetch or (lambda offset: http_get(
+        TOURNAMENTS_BASE.format(limit=TOURNAMENTS_LIMIT, offset=offset)))
+    sid = snapshot_id or datetime.now(timezone.utc).isoformat(
+        timespec="seconds")
+    offset, first_total = 0, None
+    with gzip.open(path, "at") as f:
+        while True:
+            body = with_retries(lambda o=offset: fetch(o), sleep=sleep,
+                                label=f"tournaments offset={offset}")
+            page = json.loads(body)
+            if "total" not in page or "results" not in page:
+                raise ValueError(f"tournaments page at {offset}: missing "
+                                 f"total/results (contract drift)")
+            total = page["total"]["count"]
+            if first_total is None:
+                first_total = total
+            elif total != first_total:
+                raise ValueError(
+                    f"total.count changed mid-snapshot ({first_total} -> "
+                    f"{total}): rows shifted under us; snapshot {sid} is torn "
+                    f"- refetch")
+            f.write(json.dumps({
+                "snapshot_id": sid,
+                "fetched_at": datetime.now(timezone.utc).isoformat(
+                    timespec="seconds"),
+                "url": TOURNAMENTS_BASE.format(limit=TOURNAMENTS_LIMIT,
+                                               offset=offset),
+                "offset": offset, "body": body}) + "\n")
+            offset += len(page["results"])
+            if offset >= total or not page["results"]:
+                break
+            sleep(MIN_DELAY + random.random())
+    return sid
+
+
+def latest_complete_snapshot(path=SNAPSHOTS_PATH):
+    """(snapshot_id, rows) for the newest COMPLETE snapshot in the file.
+
+    Completeness is re-derived from the file (parse-time authority, spec 7):
+    per snapshot_id, every page's total.count identical AND the offset
+    row-chain covers the total. Torn snapshots are skipped LOUDLY."""
+    if not Path(path).exists():
+        return None, []
+    snaps = {}   # sid -> list of (offset, total, results)
+    order = []
+    with gzip.open(path, "rt") as f:
+        for line in f:
+            rec = json.loads(line)
+            page = json.loads(rec["body"])
+            sid = rec["snapshot_id"]
+            if sid not in snaps:
+                snaps[sid] = []
+                order.append(sid)
+            snaps[sid].append((rec["offset"], page["total"]["count"],
+                               page["results"]))
+    for sid in reversed(order):
+        pages = sorted(snaps[sid])
+        totals = {t for _, t, _ in pages}
+        chain_ok = (pages[0][0] == 0 and all(
+            b == a + len(rows) for (a, _, rows), (b, _, _)
+            in zip(pages, pages[1:])))
+        covered = pages and (pages[-1][0] + len(pages[-1][2]) >= pages[0][1])
+        if len(totals) == 1 and chain_ok and covered:
+            rows = [r for _, _, page_rows in pages for r in page_rows]
+            return sid, rows
+        print(f"  skipping torn tournaments snapshot {sid} "
+              f"(totals={sorted(totals)}, chain_ok={chain_ok}, "
+              f"covered={covered})")
+    return None, []
+
+
+def parse_tournaments(db_path=DB_PATH, snapshots_path=SNAPSHOTS_PATH,
+                      whitelist_path=TOURNAMENT_WHITELIST):
+    """Load the latest complete snapshot into `tournaments` + run the join
+    check. Local-only (no network). Returns a report dict; join failures make
+    ok=False. A missing/stale tournaments snapshot NEVER affects the matches
+    build - this runs only under its own CLI flag (spec 7 W3c independence)."""
+    sid, rows = latest_complete_snapshot(snapshots_path)
+    if sid is None:
+        raise SystemExit("no complete tournaments snapshot in "
+                         f"{snapshots_path} (run --fetch-tournaments)")
+    whitelist = {}
+    if Path(whitelist_path).exists():
+        whitelist = {w["id"]: w for w in
+                     json.load(open(whitelist_path))["whitelist"]}
+    con = sqlite3.connect(db_path)
+    try:
+        con.execute("DELETE FROM tournaments")
+        null_names = 0
+        by_id = {}
+        for t in rows:                       # latest-wins within the snapshot
+            missing = [k for k in TOURNAMENT_KEYS if k not in t]
+            if missing:
+                raise ValueError(f"tournament {t.get('id')}: missing contract "
+                                 f"keys {missing}")
+            by_id[t["id"]] = t
+        for tid in sorted(by_id):
+            t = by_id[tid]
+            if t["name"] is None:
+                null_names += 1
+            con.execute(
+                "INSERT INTO tournaments VALUES "
+                "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (t["id"], t["name"], t["slug"], t["short_name"],
+                 t["start_date"], t["end_date"], t["tier"], t["tier_rank"],
+                 t["region_id"], t["country_id"], t["event_type"],
+                 t["event_scope"], t["event_level"], t["prize"], t["status"],
+                 json.dumps(t["pickem_presence"]), sid, PARSE_VERSION))
+        con.execute("INSERT OR REPLACE INTO parse_meta VALUES (?,?)",
+                    ("tournaments_snapshot_id", sid))
+
+        # Join integrity: ids referenced by matches but absent from the
+        # snapshot. Staleness != failure: an id whose matches were fetched
+        # AFTER this snapshot began just needs a refresh.
+        missing_rows = con.execute(
+            "SELECT tournament_id, MAX(fetched_at) FROM matches "
+            "WHERE tournament_id IS NOT NULL AND tournament_id NOT IN "
+            "(SELECT tournament_id FROM tournaments) "
+            "GROUP BY tournament_id").fetchall()
+        stale = [tid for tid, fa in missing_rows if fa > sid]
+        gone = [tid for tid, fa in missing_rows if fa <= sid]
+        whitelisted = [tid for tid in gone if tid in whitelist]
+        failing = [tid for tid in gone if tid not in whitelist]
+        con.commit()
+    finally:
+        con.close()
+    return {"snapshot_id": sid, "tournaments_n": len(by_id),
+            "null_names": null_names, "stale_ids": stale,
+            "whitelisted_ids": whitelisted, "failing_ids": failing,
+            "ok": not failing}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--rebuild", action="store_true",
-                    help="full deterministic rebuild from the raw archive")
+                    help="full deterministic rebuild from the raw archive "
+                         "(wipes the DB incl. tournaments; re-run "
+                         "--parse-tournaments after, no network needed)")
+    ap.add_argument("--fetch-tournaments", action="store_true",
+                    help="NETWORK: append one full tournaments snapshot "
+                         "(~31 requests, politely paced)")
+    ap.add_argument("--parse-tournaments", action="store_true",
+                    help="load the latest complete snapshot + join check "
+                         "(local)")
     ap.add_argument("--db", default=DB_PATH, help="output sqlite path")
     args = ap.parse_args()
-    if not args.rebuild:
-        raise SystemExit("nothing to do (use --rebuild)")
-    report = build_db(db_path=args.db)
-    ok, failures = reconcile(report, db_path=args.db)
-    print(f"parsed {report['rows_seen']} rows -> {report['unique_ids']} "
-          f"matches ({report['clean_n']} clean, "
-          f"{report['quarantined_n']} quarantined)")
-    for reason, count in sorted(report["reason_counts"].items()):
-        print(f"  {reason}: {count}")
-    print(f"reconciled: {ok}")
-    if not ok:
-        for f in failures:
-            print(f"  FAIL: {f}")
-        raise SystemExit(1)
+    if not (args.rebuild or args.fetch_tournaments or args.parse_tournaments):
+        raise SystemExit("nothing to do (use --rebuild / --fetch-tournaments "
+                         "/ --parse-tournaments)")
+    if args.rebuild:
+        report = build_db(db_path=args.db)
+        ok, failures = reconcile(report, db_path=args.db)
+        print(f"parsed {report['rows_seen']} rows -> {report['unique_ids']} "
+              f"matches ({report['clean_n']} clean, "
+              f"{report['quarantined_n']} quarantined)")
+        for reason, count in sorted(report["reason_counts"].items()):
+            print(f"  {reason}: {count}")
+        print(f"reconciled: {ok}")
+        if not ok:
+            for f in failures:
+                print(f"  FAIL: {f}")
+            raise SystemExit(1)
+    if args.fetch_tournaments:
+        sid = fetch_tournaments()
+        print(f"tournaments snapshot {sid} archived -> "
+              f"{SNAPSHOTS_PATH.name}")
+    if args.parse_tournaments:
+        r = parse_tournaments(db_path=args.db)
+        print(f"tournaments: {r['tournaments_n']} rows from snapshot "
+              f"{r['snapshot_id']} (null names: {r['null_names']})")
+        if r["stale_ids"]:
+            print(f"  stale snapshot - refresh needed for "
+                  f"{len(r['stale_ids'])} ids: {r['stale_ids'][:10]}")
+        if r["whitelisted_ids"]:
+            print(f"  whitelisted (deleted upstream, skip-but-report): "
+                  f"{r['whitelisted_ids']}")
+        if not r["ok"]:
+            print(f"  FAIL: ids referenced by matches but absent from the "
+                  f"snapshot and not whitelisted: {r['failing_ids']}")
+            raise SystemExit(1)
 
 
 if __name__ == "__main__":
