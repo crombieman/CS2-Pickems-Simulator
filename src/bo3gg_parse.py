@@ -59,13 +59,27 @@ WINS_NEEDED = {1: 1, 2: 2, 3: 2, 5: 3}
 MAX_MAPS = {1: 1, 2: 2, 3: 3, 5: 5}
 QUARANTINE_MAX_RATE = 0.02   # census-calibrated tripwire (spec 5): ~1.0% expected
 
-# Load-bearing key subset (census 2026-07-01: all keys present on all 71,812
-# rows). Absence = the API contract changed under us -> raise.
+# Full pinned archive contract (spec 5: a row missing ANY observed key
+# raises - absence = the API contract changed under us). Census 2026-07-01
+# observed 42 keys on all rows; full-archive re-scan 2026-07-05 observed 43
+# identical keys on all 71,884 rows (upstream ADDED one - additions never
+# raise, removals do). First block = the consumed/load-bearing subset
+# (spec 1); second block = observed-only drift tripwires.
 REQUIRED_KEYS = ("id", "slug", "start_date", "end_date", "bo_type",
                  "team1", "team2", "team1_id", "team2_id",
                  "team1_score", "team2_score", "winner_team_id", "tier",
                  "tournament_id", "stage_id", "round_id", "maps_score",
-                 "status", "parsed_status")
+                 "status", "parsed_status",
+                 # unconsumed but observed (contract drift tripwires):
+                 "bet_updates", "comments", "comments_count",
+                 "discipline_id", "game_version", "live_coverage",
+                 "live_coverage_advantage", "live_coverage_source",
+                 "live_updates", "loser_team_id", "points", "position",
+                 "prev_match1_id", "prev_match1_winner", "prev_match2_id",
+                 "prev_match2_winner", "rating", "stars",
+                 "team1_last_game_score", "team1_new_participant",
+                 "team2_last_game_score", "team2_new_participant",
+                 "tier_rank", "winner_team")
 
 # Tournament row contract: the DDL-consumed fields, existence probe-verified
 # 2026-07-02 and pinned operationally by the first full snapshot (a miss on
@@ -203,6 +217,17 @@ def _require_contract(m, prov):
         raise ValueError(f"{prov['src_chunk']}@{prov['src_offset']}: match "
                          f"{m['id']} has no start_date (load-bearing for "
                          f"ordering - contract drift, not a degenerate match)")
+    try:
+        # spec 5: unparseable is contract drift too - a non-empty garbage
+        # timestamp would silently poison ordering, last-seen tie-breaks
+        # and the audit's date windows. (re-scan 2026-07-05: all 71,884
+        # archive rows parse.)
+        datetime.fromisoformat(m["start_date"].replace("Z", "+00:00"))
+    except (ValueError, TypeError, AttributeError) as e:
+        raise ValueError(
+            f"{prov['src_chunk']}@{prov['src_offset']}: match {m['id']} "
+            f"start_date {m['start_date']!r} is unparseable (contract: "
+            f"ISO-8601 - drift, not a degenerate match)") from e
 
 
 # -- build --------------------------------------------------------------------

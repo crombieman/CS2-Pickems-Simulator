@@ -27,13 +27,26 @@ def team(tid, name):
 def match(mid, *, bo=3, t1=1, t2=2, s1=2, s2=0, winner="t1",
           start="2026-01-01T10:00:00+00:00", **over):
     w = {"t1": t1, "t2": t2, None: None}[winner]
+    loser = {"t1": t2, "t2": t1, None: None}[winner]
     m = {"id": mid, "slug": f"m{mid}", "start_date": start,
          "end_date": start, "bo_type": bo,
          "team1": team(t1, f"Team{t1}"), "team2": team(t2, f"Team{t2}"),
          "team1_id": t1, "team2_id": t2, "team1_score": s1, "team2_score": s2,
          "winner_team_id": w, "tier": "s", "tournament_id": 500,
          "stage_id": 9, "round_id": 7, "maps_score": [True, True],
-         "status": "finished", "parsed_status": "done"}
+         "status": "finished", "parsed_status": "done",
+         # unconsumed archive-contract keys: the parser pins ALL observed
+         # keys (spec 5 - a missing one is contract drift), so fixtures must
+         # carry the full 43-key row shape the real archive has.
+         "bet_updates": None, "comments": None, "comments_count": 0,
+         "discipline_id": 1, "game_version": None, "live_coverage": False,
+         "live_coverage_advantage": None, "live_coverage_source": None,
+         "live_updates": None, "loser_team_id": loser, "points": None,
+         "position": None, "prev_match1_id": None, "prev_match1_winner": None,
+         "prev_match2_id": None, "prev_match2_winner": None, "rating": None,
+         "stars": 0, "team1_last_game_score": None,
+         "team1_new_participant": False, "team2_last_game_score": None,
+         "team2_new_participant": False, "tier_rank": 1, "winner_team": None}
     m.update(over)
     return m
 
@@ -147,6 +160,24 @@ class TestContractRaises(unittest.TestCase):
 
     def test_null_start_date_raises(self):
         fx = FixtureArchive().write([[match(1, start=None)]]).state(1)
+        with self.assertRaises(ValueError):
+            self._build(fx)
+
+    def test_missing_unconsumed_contract_key_raises(self):
+        # spec 1/5: the pinned contract is ALL observed keys, not just the
+        # consumed subset - upstream dropping loser_team_id must stop the
+        # build even though the parser never reads it.
+        fx = FixtureArchive()
+        bad = match(1)
+        del bad["loser_team_id"]
+        fx.write([[bad]]).state(1)
+        with self.assertRaises(ValueError):
+            self._build(fx)
+
+    def test_unparseable_start_date_raises(self):
+        # spec 5: NULL/unparseable start_date raises - a non-empty garbage
+        # timestamp must not slip into ordering/joins/date windows.
+        fx = FixtureArchive().write([[match(1, start="not-a-date")]]).state(1)
         with self.assertRaises(ValueError):
             self._build(fx)
 

@@ -11,6 +11,7 @@ Checks:
   duplicate pairings (same unordered pair, same scheduled start).
 - Tier cross-check: MAX(matches.tier) per tournament vs tournaments.tier;
   divergences are informational (per-row tier stays authoritative, W3 spec 7).
+  An empty tournaments slice flags tier_check_vacuous - surfaced, not silent.
 - Reference orientation cross-check: the committed two-source Cologne results
   (results_matches_stage3.json + results_matches_playoffs.json) resolved via
   canonical_alias, joined by day + team pair - the parsed winner must agree.
@@ -23,7 +24,9 @@ Checks:
 The audit NEVER edits `matches` - findings land in the additive `audit_flags`
 table (severity 'fail' = data integrity broken, nonzero exit; 'report' =
 informational, surfaced not fatal), so build_db output stays byte-identical
-and the audit re-runs idempotently. E.1 Liquipedia source cross-validation is
+and the audit re-runs idempotently. Empty reference/CSV inputs RAISE unless
+explicitly opted into (vacuous cross-checks must never mint audit_ok=true);
+the denominators used are stamped into parse_meta.audit_input_counts. E.1 Liquipedia source cross-validation is
 a flagged follow-on (needs a fetcher - own small cycle, master spec 5).
 
 Promoted-rows query for W6/W8 consumers (documented, NOT wired - the fit
@@ -44,7 +47,7 @@ from pathlib import Path
 
 from bo3gg_parse import DATA, DB_PATH
 
-AUDIT_VERSION = "v1:promotion+impossible+tier+reference+csv"
+AUDIT_VERSION = "v1.1:promotion+impossible+tier+reference+csv+vacuity-guards"
 
 REFERENCE_FILES = (DATA / "results_matches_stage3.json",
                    DATA / "results_matches_playoffs.json")
@@ -168,8 +171,19 @@ def scan_impossible(con):
 # -- tier cross-check (W3 spec 7 W3c: informational until proven load-bearing) -
 def tier_cross_check(con):
     """MAX(matches.tier) per tournament vs tournaments.tier. Divergences are
-    reported, never fatal - per-row tier stays authoritative for grouping."""
+    reported, never fatal - per-row tier stays authoritative for grouping.
+
+    An EMPTY tournaments slice (e.g. --rebuild without --parse-tournaments)
+    makes the join vacuous - that skip is surfaced as a report flag, never
+    silent. Report-severity keeps W3c's independence: a matches-only DB still
+    audits, but nobody mistakes a vacuous check for a passing one."""
     _ensure(con)
+    if con.execute("SELECT COUNT(*) FROM tournaments").fetchone()[0] == 0:
+        _flag(con, None, "tier_check_vacuous", "report",
+              "tournaments table empty - tier cross-check ran against "
+              "nothing (run bo3gg_parse.py --parse-tournaments after a "
+              "rebuild)")
+        return []
     divergences = con.execute(
         "SELECT m.tournament_id, MAX(m.tier) AS mt, t.tier "
         "FROM matches m JOIN tournaments t "
@@ -287,10 +301,22 @@ def cross_check_csv(con, csv_rows, since=CSV_SINCE):
 
 # -- orchestration --------------------------------------------------------------
 def run_audit(db_path=DB_PATH, reference_rows=(), csv_rows=(),
-              since=CSV_SINCE):
+              since=CSV_SINCE, allow_empty_inputs=False):
     """Full audit: clear + rewrite audit_flags, stamp parse_meta, return
     (ok, report). ok is False iff any severity='fail' flag exists.
-    Deterministic given the same DB + inputs (no wall-clock)."""
+    Deterministic given the same DB + inputs (no wall-clock).
+
+    Empty reference/CSV inputs make those cross-checks vacuous - audit_ok
+    would assert what was never verified - so they RAISE unless the caller
+    explicitly opts into a partial audit (tests do; production must not)."""
+    reference_rows = list(reference_rows)
+    csv_rows = list(csv_rows)
+    if not allow_empty_inputs and not (reference_rows and csv_rows):
+        raise ValueError(
+            "run_audit: empty reference_rows/csv_rows would make the "
+            "orientation/coverage cross-checks vacuous (audit_ok=true while "
+            "verifying nothing). Pass the real inputs (see main()) or set "
+            "allow_empty_inputs=True for a deliberately partial audit.")
     con = sqlite3.connect(db_path)
     try:
         _ensure(con)
@@ -299,8 +325,10 @@ def run_audit(db_path=DB_PATH, reference_rows=(), csv_rows=(),
             "promotions": classify_promotions(con),
             "impossible": scan_impossible(con),
             "tier_divergences": tier_cross_check(con),
-            "reference": cross_check_reference(con, list(reference_rows)),
-            "csv": cross_check_csv(con, list(csv_rows), since=since),
+            "reference": cross_check_reference(con, reference_rows),
+            "csv": cross_check_csv(con, csv_rows, since=since),
+            "input_counts": {"reference_n": len(reference_rows),
+                             "csv_n": len(csv_rows)},
         }
         fails = con.execute("SELECT COUNT(*) FROM audit_flags "
                             "WHERE severity = 'fail'").fetchone()[0]
@@ -311,7 +339,9 @@ def run_audit(db_path=DB_PATH, reference_rows=(), csv_rows=(),
         for k, v in (("audit_version", AUDIT_VERSION),
                      ("audit_ok", "true" if ok else "false"),
                      ("audit_flag_counts",
-                      json.dumps(report["flag_counts"]))):
+                      json.dumps(report["flag_counts"])),
+                     ("audit_input_counts",
+                      json.dumps(report["input_counts"]))):
             con.execute("INSERT OR REPLACE INTO parse_meta VALUES (?,?)",
                         (k, v))
         con.commit()

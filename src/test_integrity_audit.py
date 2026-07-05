@@ -161,9 +161,21 @@ class TestTierCrossCheck(DbCase):
         con = self._with_tournament([match(1)], tier="s")
         self.assertEqual(tier_cross_check(con), [])
 
-    def test_tournament_absent_skipped(self):
+    def test_tournament_absent_vacuity_flagged(self):
+        # empty tournaments slice (e.g. --rebuild without --parse-tournaments):
+        # no divergences, but the skip must be SURFACED, never silent - a
+        # vacuous check reporting nothing is the exact silent-error class W4
+        # exists to kill.
         db, con = self.build([match(1)])   # tournaments table empty
         self.assertEqual(tier_cross_check(con), [])
+        got = flags(con, "tier_check_vacuous")
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0][2], "report")
+
+    def test_tournament_present_no_vacuity_flag(self):
+        con = self._with_tournament([match(1)], tier="s")
+        tier_cross_check(con)
+        self.assertEqual(flags(con, "tier_check_vacuous"), [])
 
 
 REF_ALIASES = [alias("Alpha", 21), alias("Bravo", 22), alias("Charlie", 23),
@@ -273,8 +285,11 @@ class TestRunAudit(DbCase):
     def _run(self, rows, aliases=None, reference=(), csv_rows=()):
         db, con = self.build(rows, aliases)
         con.close()
+        # tests audit deliberately partial fixtures; production callers get
+        # the strict default (empty inputs raise - vacuous-pass guard)
         ok, report = run_audit(db, reference_rows=list(reference),
-                               csv_rows=list(csv_rows))
+                               csv_rows=list(csv_rows),
+                               allow_empty_inputs=True)
         return db, ok, report
 
     def test_clean_audit_ok_and_meta(self):
@@ -314,7 +329,8 @@ class TestRunAudit(DbCase):
         con.close()
         dumps = []
         for _ in range(2):
-            run_audit(db, reference_rows=ref_rows(), csv_rows=[])
+            run_audit(db, reference_rows=ref_rows(), csv_rows=[],
+                      allow_empty_inputs=True)
             con = sqlite3.connect(db)
             dumps.append("\n".join(con.iterdump()))
             con.close()
@@ -327,6 +343,32 @@ class TestRunAudit(DbCase):
             "SELECT DISTINCT audit_version FROM audit_flags").fetchall()
         con.close()
         self.assertEqual(vers, [(AUDIT_VERSION,)])
+
+    def test_empty_inputs_raise_without_optin(self):
+        # vacuous-pass guard: a programmatic caller (the W6 harness) that
+        # forgets the inputs must NOT get audit_ok=true from cross-checks
+        # that ran on nothing.
+        db, con = self.build(ref_db_rows(), REF_ALIASES)
+        con.close()
+        with self.assertRaises(ValueError):
+            run_audit(db, reference_rows=[], csv_rows=[])
+        with self.assertRaises(ValueError):
+            run_audit(db, reference_rows=ref_rows(), csv_rows=[])
+
+    def test_input_counts_stamped(self):
+        # the denominators the cross-checks ran with are provenance: a
+        # vacuous audit must be detectable from parse_meta after the fact.
+        db, ok, report = self._run(ref_db_rows(), REF_ALIASES,
+                                   reference=ref_rows(),
+                                   csv_rows=[{"winner": "Alpha",
+                                              "loser": "Bravo",
+                                              "event": "t"}])
+        self.assertEqual(report["input_counts"],
+                         {"reference_n": 2, "csv_n": 1})
+        con = self.connect(db)
+        self.assertEqual(json.loads(con.execute(
+            "SELECT value FROM parse_meta WHERE key='audit_input_counts'"
+        ).fetchone()[0]), {"reference_n": 2, "csv_n": 1})
 
 
 if __name__ == "__main__":
