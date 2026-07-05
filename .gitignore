@@ -13,3 +13,7 @@ data/stage3_probs_live.json
 
 # derived D1 substrate — rebuild with `python src/bo3gg_parse.py --rebuild`
 data/bo3gg/parsed.sqlite
+
+# W6 harness derived outputs (runs, fit cache); configs stay committed
+data/harness/*
+!data/harness/configs/

@@ -299,6 +299,39 @@ def cross_check_csv(con, csv_rows, since=CSV_SINCE):
     return r
 
 
+# -- consumer view (W6 spec 1: THE single tested query) -------------------------
+CONSUMER_COLUMNS = ("match_id", "start_date", "bo_type", "team1_id",
+                    "team2_id", "team1_score", "team2_score",
+                    "winner_team_id", "tier", "tournament_id", "stage_id",
+                    "round_id", "quarantine_reason")
+
+
+def consumer_rows(con):
+    """The consumer view: clean rows + score-proven inferred_multi_map
+    promotions; forfeit signatures and every other quarantine class stay out.
+    The harness (W6) and the fit path (W8) import THIS - the view is never
+    re-derived ad hoc (W6 spec review fix).
+
+    Requires the audit (at least classify_promotions) to have run first: on a
+    DB with no audit_flags table the LEFT JOIN would silently hide every
+    promoted row, so that is an error, not an empty view."""
+    has_flags = con.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' "
+        "AND name='audit_flags'").fetchone()
+    if not has_flags:
+        raise ValueError(
+            "consumer_rows: audit_flags table missing - run the integrity "
+            "audit before consuming this DB (an unaudited view would "
+            "silently drop promoted rows)")
+    cols = ", ".join(f"m.{c}" for c in CONSUMER_COLUMNS)
+    q = (f"SELECT {cols} FROM matches m "
+         "LEFT JOIN audit_flags f ON f.match_id = m.match_id "
+         "AND f.flag = 'inferred_multi_map' "
+         "WHERE m.quarantine_reason IS NULL OR f.flag IS NOT NULL "
+         "ORDER BY m.match_id")
+    return [dict(zip(CONSUMER_COLUMNS, r)) for r in con.execute(q)]
+
+
 # -- orchestration --------------------------------------------------------------
 def run_audit(db_path=DB_PATH, reference_rows=(), csv_rows=(),
               since=CSV_SINCE, allow_empty_inputs=False):

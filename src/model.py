@@ -59,15 +59,34 @@ def load_matches(path: Path = DATA / "matches_2026.csv"):
 
 
 def fit_bradley_terry(matches, priors=PRIORS, sigma_s3=70.0, sigma_other=50.0,
-                      iters=4000, lr=2000.0):
+                      iters=4000, lr=2000.0, recenter_on=None,
+                      converge_tol=None):
     """MAP estimate: weighted BT log-likelihood + Gaussian prior per team.
 
     sigma controls how far data can move a team off its prior. 70 Elo for
     Stage 3 teams lets ~60 series move ratings meaningfully; 50 for connector
     teams keeps thin-sample teams pinned near tier priors.
+
+    recenter_on: teams whose mean rating is pinned back to their mean prior
+    after the fit (BT is translation-invariant, so the level is a free
+    choice). None = STAGE3_TEAMS, the original behavior byte-for-byte (held
+    by CI's fit-reproducibility gate). The W6 harness passes its own fit
+    universe: the STAGE3_TEAMS default would KeyError on id-keyed historical
+    universes (W6 spec 1). Note sigma bucketing also references
+    STAGE3_TEAMS - id universes fall through to sigma_other, so the harness
+    passes both sigmas explicitly to declare its uniform-sigma semantics.
+
+    converge_tol: if set, stop once the largest per-team step (Elo) falls
+    below it, and RAISE if that never happens within `iters` - an
+    oscillating fit snapshot is not a fit. Needed because lr is
+    stability-bounded by the densest team's match count (W6a probe,
+    2026-07-05: at lr=2000 a 300-match pair flips between two garbage
+    states forever; ~8-match Cologne teams are far inside the stable
+    region). None = original fixed-iteration behavior, byte-identical.
     """
     ratings = dict(priors)
     sigma = {t: (sigma_s3 if t in STAGE3_TEAMS else sigma_other) for t in priors}
+    max_step = None
     for _ in range(iters):
         grad = {t: 0.0 for t in priors}
         for w, l, wt in matches:
@@ -79,9 +98,20 @@ def fit_bradley_terry(matches, priors=PRIORS, sigma_s3=70.0, sigma_other=50.0,
             grad[t] -= (ratings[t] - priors[t]) / sigma[t] ** 2
         for t in priors:
             ratings[t] += lr * grad[t]
-    # re-center Stage 3 mean to prior mean (BT is translation-invariant)
-    shift = (sum(priors[t] for t in STAGE3_TEAMS)
-             - sum(ratings[t] for t in STAGE3_TEAMS)) / len(STAGE3_TEAMS)
+        if converge_tol is not None:
+            max_step = max(abs(lr * g) for g in grad.values())
+            if max_step < converge_tol:
+                break
+    else:
+        if converge_tol is not None:
+            raise ValueError(
+                f"fit_bradley_terry: no convergence within {iters} iters "
+                f"(last max step {max_step:.4f} Elo >= tol {converge_tol}); "
+                f"lower lr or raise the iteration cap")
+    # re-center anchor-set mean to prior mean (BT is translation-invariant)
+    anchor = STAGE3_TEAMS if recenter_on is None else recenter_on
+    shift = (sum(priors[t] for t in anchor)
+             - sum(ratings[t] for t in anchor)) / len(anchor)
     return {t: r + shift for t, r in ratings.items()}
 
 
