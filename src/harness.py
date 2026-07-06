@@ -1247,8 +1247,12 @@ def run_replay(db_path, candidate_path, *, incumbent_path=None,
             "a holdout run cannot be limited: a partial touch still burns "
             "the reserve while proving nothing (spec 5.3)")
     candidate_path = Path(candidate_path)
-    incumbent_path = Path(incumbent_path or CONFIGS_DIR / "incumbent_v0.json")
-    harness_path = Path(harness_path or CONFIGS_DIR / "harness_v0.json")
+    # Defaults track the ADOPTED reference: incumbent_v1 = sigma-85
+    # (f-sigma-v1 holdout confirmation, run 5d14e8b9b8a5e486, 2026-07-05)
+    # and harness_v1 = the post-burn reserve rotation (holdout split
+    # 2026-01-01). v0 files stay committed for provenance.
+    incumbent_path = Path(incumbent_path or CONFIGS_DIR / "incumbent_v1.json")
+    harness_path = Path(harness_path or CONFIGS_DIR / "harness_v1.json")
     baseline_paths = [Path(p) for p in
                       (baseline_paths if baseline_paths is not None
                        else [CONFIGS_DIR / "baseline_uniform.json"])]

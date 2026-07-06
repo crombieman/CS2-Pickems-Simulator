@@ -1279,6 +1279,23 @@ class TestConfigs(unittest.TestCase):
         self.assertIsNone(cfg["knob_id"])
         self.assertIn("forward_prereg", cfg)     # W12 extends, never forks
 
+    def test_adopted_incumbent_v1_and_reserve_rotation(self):
+        # First gate adoption (f-sigma-v1, holdout run 5d14e8b9b8a5e486):
+        # incumbent_v1 = sigma 85; harness_v1 rotates the burned reserve.
+        inc = load_config(CONFIGS / "incumbent_v1.json")
+        self.assertEqual(inc["name"], "incumbent_v1")
+        self.assertEqual(inc["model"]["sigma"], 85)
+        inc0 = load_config(CONFIGS / "incumbent_v0.json")
+        self.assertEqual({k: v for k, v in inc["model"].items()
+                          if k != "sigma"},
+                         {k: v for k, v in inc0["model"].items()
+                          if k != "sigma"})
+        h1 = load_config(CONFIGS / "harness_v1.json")
+        self.assertEqual(h1["holdout_split"], "2026-01-01")
+        self.assertEqual(h1["reserve_split"], "2026-07-01")
+        h0 = load_config(CONFIGS / "harness_v0.json")
+        self.assertEqual(h0["holdout_split"], "2025-07-01")  # frozen history
+
     def test_cologne_event_config_pins_substrate_tournament(self):
         # W6c: the slate arm links EventConfig -> substrate via tournament_id
         from event_config import COLOGNE

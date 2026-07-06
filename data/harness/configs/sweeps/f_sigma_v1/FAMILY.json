@@ -18,5 +18,22 @@
   },
   "motivation": "W6a/b ship-gate smoke: an UNREGISTERED sigma-60 probe DEV-SCREENED at paired dBrier -0.002446 (CI [-0.002934, -0.001958], 182 dev events). Prior tightness looks like a live knob.",
   "disclosure": "sigma=60 was peeked exploratorily on the DEV split (runs 78b90070de05e905, 7db571441ce74076) before this registration. Dev is the screening set, so the peek inflates dev-selection optimism only; the HOLDOUT remains untouched by any member of this family and is the sole adoption evidence (spec 5.2/5.3).",
-  "protocol": "All variants replay the dev split through run_replay; select_nominee picks at most ONE nominee (best dev mean among DEV-SCREENED); the holdout confirmation run requires an explicit go from Will (first burn of the reserve) and --nominee-from the dev run id."
+  "protocol": "All variants replay the dev split through run_replay; select_nominee picks at most ONE nominee (best dev mean among DEV-SCREENED); the holdout confirmation run requires an explicit go from Will (first burn of the reserve) and --nominee-from the dev run id.",
+  "outcome": {
+    "nominee": "f-sigma-v1-085",
+    "dev_run": "cf124cec7aa2e7ed",
+    "holdout_run": "5d14e8b9b8a5e486",
+    "verdict": "ADOPTED",
+    "holdout_stats": {
+      "mean": -0.005136,
+      "ci": [
+        -0.008112,
+        -0.002161
+      ],
+      "n_events": 46,
+      "n_matches": 1213
+    },
+    "adopted_as": "incumbent_v1.json",
+    "date": "2026-07-05"
+  }
 }
