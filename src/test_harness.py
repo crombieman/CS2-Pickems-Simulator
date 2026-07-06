@@ -1073,6 +1073,42 @@ class TestRunReplay(ReplayFixture):
         self.assertNotEqual(v["verdict"], "BLOCKED")
         self.assertFalse(v["adoption_eligible"])
 
+    def test_screening_without_arm_blocks_with_artifacts(self):
+        # Codex W6c review P1: the DoR-5(8) guard must produce a BLOCKED
+        # run WITH artifacts, never an exception that leaves no record
+        real_verdict = harness.verdict
+
+        def forced(stats, **kw):
+            if "split" in kw:      # the final classification call only -
+                return {"verdict": "DEV-SCREENED", "reason": "forced",
+                        "stats": stats}
+            return real_verdict(stats, **kw)   # self-test stays honest
+
+        with mock.patch("harness.verdict", side_effect=forced), \
+             mock.patch("harness._src_dirty", return_value=False), \
+             mock.patch("harness._git_sha", return_value="abc1234"):
+            out = self.run_it(self.blessed_db())
+        run_dir = Path(out["run_dir"])
+        self.assertTrue((run_dir / "manifest.json").exists())
+        v = json.loads((run_dir / "verdict.json").read_text())
+        self.assertEqual(v["verdict"], "BLOCKED")
+        self.assertNotIn("stats", v)
+        self.assertTrue(any("objective" in g for g in v["blocked_gates"]))
+
+    def test_blocked_run_never_executes_slate_arm(self):
+        # Codex W6c review P2: a post-coverage-blocked run must not fit or
+        # simulate the objective arm
+        strict = json.loads(self.hpath.read_text())
+        strict["verdict"]["min_events"] = 10       # fixture has only 2
+        hpath = self.root / "harness_strict2.json"
+        hpath.write_text(json.dumps(strict))
+        with mock.patch("harness._slate_arm",
+                        side_effect=AssertionError("arm must not run")) :
+            out = self.run_it(self.blessed_db(), harness_path=hpath)
+        v = json.loads((Path(out["run_dir"]) / "verdict.json").read_text())
+        self.assertEqual(v["verdict"], "BLOCKED")
+        self.assertEqual(v["objective_check"]["status"], "not-run")
+
     def test_manifest_pins_cached_ratings_content(self):
         # Codex W6b review P1: the manifest must pin WHAT the cache served,
         # not just the key
@@ -1124,6 +1160,12 @@ class TestSlateObjectiveCheck(unittest.TestCase):
         self.assertTrue(r["objective_ok"])
         self.assertEqual(r["mean"], 0.0)
         self.assertTrue(r["identical_slates"])
+
+    def test_pass_rule_is_declared_in_the_result(self):
+        # Codex W6c review P2: the CI-aware operationalization of the
+        # spec's "non-negative" must be recorded, not implicit
+        r = self.check(self.truth, self.truth, self.truth)
+        self.assertIn("CI-upper", r["pass_rule"])
 
     def test_pair_overrides_neutralized_and_restored(self):
         import simulate

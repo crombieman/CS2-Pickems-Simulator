@@ -919,7 +919,14 @@ def slate_objective_check(cand_ratings, inc_ratings, eval_ratings, *,
     t_crit = t_quantile(0.5 + ci_level / 2.0, len(sims_e) - 1)
     identical = (set(c30c) == set(c30i) and set(c03c) == set(c03i)
                  and set(advc) == set(advi))
+    # Pass rule (recorded; spec 6.2 amended 2026-07-05 per W6c review P2):
+    # the spec's "non-negative" is operationalized CI-aware because a strict
+    # point-estimate rule false-flags a TRUE-zero slate delta ~50% of the
+    # time under MC noise; identical slates still give exactly 0.
+    pass_rule = ("mean>=0 or CI-upper>=0 at ci_level (operationalizes "
+                 "'non-negative paired objective delta' under MC noise)")
     return {"objective_ok": mean >= 0 or (mean + t_crit * se) >= 0,
+            "pass_rule": pass_rule,
             "mean": mean, "se": se,
             "ci": [mean - t_crit * se, mean + t_crit * se],
             "identical_slates": identical,
@@ -1080,12 +1087,27 @@ def _slate_arm(rows, all_events, aliases, harness_cfg, cand_cfg, inc_cfg,
     if computed_oks:
         objective_ok = all(computed_oks)
         check_status = "ok" if objective_ok else "negative"
+        src_dir = Path(__file__).resolve().parent
+        # Spec 3.3 objective_replay_inputs, honestly populated (review P2):
+        # everything the arm CONSUMED gets a sha; every spec-listed input
+        # the v0 belief-based arm does NOT consume is named with the reason
+        # - never silently partial.
         inputs = {"events": inputs_events,
                   "seed": harness_cfg["seeds"]["slate_sim"],
                   "n_sims": harness_cfg["mc"]["slate_sims"],
                   "eval_measure": "incumbent",
                   "market_policy": "none (pure-model arm)",
-                  "results_consumed": None}
+                  "sim_code_sha": _sha(src_dir / "simulate.py"),
+                  "optimize_code_sha": _sha(src_dir / "optimize.py"),
+                  "ratings_source": "walk-forward fits (fit_cache above; "
+                                    "no locked/anchored ratings consumed)",
+                  "anchors_files": "none-consumed (market policy 'none': "
+                                   "PAIR_OVERRIDES emptied for the arm)",
+                  "results_files": "none-consumed (belief-based arm: no "
+                                   "realized outcomes touch the check)",
+                  "graded_log": "none-consumed here (the Cologne "
+                                "known-answer cross-check runs at test "
+                                "level, not inside replay runs)"}
     else:
         objective_ok, check_status, inputs = None, "no-slate-events-computed", None
     check = {"status": check_status, "events": arm_events,
@@ -1203,23 +1225,30 @@ def run_replay(db_path, candidate_path, *, incumbent_path=None,
                                  "tournament_id": s["tournament_id"],
                                  "coverage": s["coverage"]})
         stats, included = _stats_from_summaries(summaries, harness_cfg)
-        objective_check, objective_inputs, objective_ok = _slate_arm(
-            rows, all_events, aliases, harness_cfg, cand_cfg, inc_cfg,
-            cache_dir, substrate_sha, v_cfg["ci_level"])
         if stats is None or stats["n_events"] < v_cfg["min_events"]:
+            # blocked runs never fit/simulate the objective arm (review P2)
             n = 0 if stats is None else stats["n_events"]
             blocked_gates.append(
                 f"gate min_events: insufficient-n: {n} included events "
                 f"< min_events {v_cfg['min_events']} (post-coverage)")
         else:
+            objective_check, objective_inputs, objective_ok = _slate_arm(
+                rows, all_events, aliases, harness_cfg, cand_cfg, inc_cfg,
+                cache_dir, substrate_sha, v_cfg["ci_level"])
             verdict_obj = verdict(stats, mde=v_cfg["mde_brier"],
                                   min_events=v_cfg["min_events"],
                                   objective_ok=(objective_ok
                                                 if objective_ok is not None
                                                 else True),
                                   split=split)
-            _guard_screening_needs_objective(verdict_obj["verdict"],
-                                             objective_ok is not None)
+            try:
+                # DoR 5(8): screening without the arm is a BLOCKED run with
+                # full artifacts, never an unrecorded exception (review P1)
+                _guard_screening_needs_objective(verdict_obj["verdict"],
+                                                 objective_ok is not None)
+            except HarnessError as e:
+                blocked_gates.append(str(e))
+                verdict_obj = None
 
     code_dirty = _src_dirty()
     manifest = {
