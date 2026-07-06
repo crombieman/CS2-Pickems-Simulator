@@ -274,17 +274,31 @@ def fit_cache_key(engine_config_sha, universe, fit_match_ids, window_spec,
 def cached_fit(cache_dir, key, fit_fn):
     """Content-addressed fit cache in data/harness/cache/ (derived,
     gitignored). Incumbent fits across a knob sweep hit cache after the
-    first run - sweeps are incremental by construction."""
+    first run - sweeps are incremental by construction.
+
+    Values are stored in a versioned envelope (Codex W6b review P1): a
+    corrupt, legacy, or fit-code-stale file at the right key is a MISS
+    (recomputed and overwritten), never served. The manifest additionally
+    pins the sha of the ratings actually used, so a poisoned cache is
+    diagnosable across runs even though it cannot be prevented here."""
     cache_dir = Path(cache_dir)
     path = cache_dir / f"{key}.json"
     if path.exists():
-        with open(path) as f:
-            return json.load(f)
+        try:
+            with open(path) as f:
+                blob = json.load(f)
+        except ValueError:
+            blob = None
+        if (isinstance(blob, dict)
+                and blob.get("fit_code_version") == FIT_CODE_VERSION
+                and isinstance(blob.get("ratings"), dict)):
+            return blob["ratings"]
     ratings = fit_fn()
     cache_dir.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
     with open(tmp, "w") as f:
-        json.dump(ratings, f)
+        json.dump({"fit_code_version": FIT_CODE_VERSION,
+                   "ratings": ratings}, f)
     tmp.replace(path)
     return ratings
 
@@ -629,6 +643,45 @@ def diff_paths(cand, inc, _prefix=""):
     return paths
 
 
+def gate_holdout_nominee(nominated_by, run_root, cand_sha, inc_sha,
+                         harness_sha):
+    """Gate for holdout runs (spec 5.3, Codex W6b review P1): the holdout
+    CONFIRMS a nominee, it never screens. The run must reference a recorded
+    dev run whose verdict is DEV-SCREENED for THIS candidate/incumbent pair
+    under THIS harness config, and that dev run must itself have been
+    adoption-eligible. Defends against workflow mistakes, not filesystem
+    tampering (single-user local run store)."""
+    if not nominated_by:
+        raise HarnessError(
+            "gate holdout-nominee: a holdout run must reference the "
+            "DEV-SCREENED dev run that nominated this candidate "
+            "(--nominee-from RUN_ID); the holdout confirms nominees, it "
+            "does not screen")
+    nom_dir = Path(run_root) / nominated_by
+    try:
+        nv = json.loads((nom_dir / "verdict.json").read_text())
+        nm = json.loads((nom_dir / "manifest.json").read_text())
+    except (OSError, ValueError) as e:
+        raise HarnessError(f"gate holdout-nominee: cannot read nominee run "
+                           f"{nominated_by}: {e}")
+    for ok, why in (
+            (nv.get("verdict") == "DEV-SCREENED",
+             f"nominee verdict is {nv.get('verdict')!r}, not DEV-SCREENED"),
+            (nm.get("split") == "dev", "nominee run was not a dev run"),
+            (nm.get("candidate_config_sha") == cand_sha,
+             "nominee candidate config differs from this candidate"),
+            (nm.get("incumbent_config_sha") == inc_sha,
+             "nominee incumbent config differs from this incumbent"),
+            (nm.get("harness_config_sha") == harness_sha,
+             "nominee ran under a different harness config (the holdout "
+             "must apply the SAME pre-registered test)"),
+            (nm.get("adoption_eligible") is True,
+             "nominee dev run was exploratory-only, not adoption-eligible")):
+        if not ok:
+            raise HarnessError(
+                f"gate holdout-nominee ({nominated_by}): {why}")
+
+
 def gate_config_diff(cand_cfg, inc_cfg):
     """Gate 3.2.7 (review fix): the candidate must differ from its incumbent
     in the declared knob paths and NOTHING else. An accidental clone or an
@@ -725,9 +778,12 @@ def _replay_prepped(prepped, cand_cfg, inc_cfg, harness_cfg, cache_dir,
                               ("inc", inc_cfg, inc_sha)):
             key = fit_cache_key(sha, u["universe"], u["fit_match_ids"],
                                 p["window_spec"], substrate_sha)
-            keys[tag] = key
-            fits[tag] = cached_fit(cache_dir, key,
-                                   lambda c=cfg, ui=u: fit_engine(c, ui))
+            ratings = cached_fit(cache_dir, key,
+                                 lambda c=cfg, ui=u: fit_engine(c, ui))
+            fits[tag] = ratings
+            # pin WHAT was served, not just the key (review P1: a poisoned
+            # cache must be diagnosable from the manifest)
+            keys[tag] = {"key": key, "ratings_sha": canonical_sha(ratings)}
         cache_keys[str(ev["tournament_id"])] = keys
         graded, skipped = grade_event_walkforward(
             p["ev_rows"], fits["cand"], fits["inc"], u["window_counts"],
@@ -850,8 +906,8 @@ def _has_placeholder(obj):
 
 def run_replay(db_path, candidate_path, *, incumbent_path=None,
                harness_path=None, baseline_paths=None, split="dev",
-               limit=None, run_root=None, cache_dir=CACHE_DIR,
-               burn_log=BURN_LOG):
+               limit=None, nominated_by=None, run_root=None,
+               cache_dir=CACHE_DIR, burn_log=BURN_LOG):
     """THE gated adoption-gate run (spec 3.2/3.3/3.4/5): all pre-replay
     gates, a content-addressed manifest + run dir with every config copied
     verbatim, per-match rows / per-event summaries / failure report, and
@@ -863,6 +919,10 @@ def run_replay(db_path, candidate_path, *, incumbent_path=None,
     Every holdout invocation that actually graded events appends to the
     committed burn log (spec 5.3) - a burned holdout is logged as burned
     regardless of outcome."""
+    if split == "holdout" and limit is not None:
+        raise HarnessError(
+            "a holdout run cannot be limited: a partial touch still burns "
+            "the reserve while proving nothing (spec 5.3)")
     candidate_path = Path(candidate_path)
     incumbent_path = Path(incumbent_path or CONFIGS_DIR / "incumbent_v0.json")
     harness_path = Path(harness_path or CONFIGS_DIR / "harness_v0.json")
@@ -877,6 +937,13 @@ def run_replay(db_path, candidate_path, *, incumbent_path=None,
     v_cfg = harness_cfg["verdict"]
 
     blocked_gates = []
+    if split == "holdout":
+        try:
+            gate_holdout_nominee(nominated_by, run_root,
+                                 config_sha(cand_cfg), config_sha(inc_cfg),
+                                 config_sha(harness_cfg))
+        except HarnessError as e:
+            blocked_gates.append(str(e))
     self_test_ok, self_test_seed = False, harness_cfg["seeds"]["self_test"]
     try:
         self_test = _run_self_test_gate(harness_cfg)
@@ -955,11 +1022,20 @@ def run_replay(db_path, candidate_path, *, incumbent_path=None,
         "seeds": harness_cfg["seeds"], "mc": harness_cfg.get("mc", {}),
         "self_test_ok": self_test_ok, "self_test_seed": self_test_seed,
         "fit_cache_keys": cache_keys,
+        "nominated_by_run_id": nominated_by,
         "blocked_gates": blocked_gates,
     }
-    manifest["adoption_eligible"] = (code_dirty is False
-                                     and not blocked_gates
-                                     and not _has_placeholder(manifest))
+    # exploratory-only unless: clean tree, all gates green, UNLIMITED run
+    # (review P1: a subset must never be adoption-grade), and no
+    # placeholder hash anywhere - INCLUDING inside the configs themselves
+    # (review P2: placeholders must not hide behind the config shas).
+    manifest["adoption_eligible"] = (
+        code_dirty is False and not blocked_gates and limit is None
+        and not _has_placeholder(manifest)
+        and not _has_placeholder({"candidate": cand_cfg,
+                                  "incumbent": inc_cfg,
+                                  "harness": harness_cfg,
+                                  "baselines": baseline_cfgs}))
     run_id = canonical_sha(manifest)[:16]
 
     if blocked_gates:
@@ -977,6 +1053,14 @@ def run_replay(db_path, candidate_path, *, incumbent_path=None,
                        "mde": v_cfg["mde_brier"],
                        "ci_level": v_cfg["ci_level"],
                        "evidence": evidence_table(all_rows, baseline_cfgs)}
+        if limit is not None:
+            # review P1: a limited run is exploratory only - it keeps its
+            # evidence but never bears a screening-grade verdict name
+            verdict_out["verdict"] = "EXPLORATORY"
+            verdict_out["reason"] = (
+                f"limited run (--limit {limit}): would classify as "
+                f"{verdict_obj['verdict']} - exploratory only, never "
+                f"verdict-bearing (spec 4.5)")
     verdict_out.update({"run_id": run_id, "split": split,
                         "sweep_family": cand_cfg.get("sweep_family"),
                         "objective_check": "not-wired-w6c",
@@ -994,15 +1078,19 @@ def run_replay(db_path, candidate_path, *, incumbent_path=None,
     for p in [harness_path, candidate_path, incumbent_path] + baseline_paths:
         shutil.copyfile(p, run_dir / "configs" / Path(p).name)
 
-    if split == "holdout" and summaries:
-        # outcomes were graded -> the holdout is burned, whatever the result
+    if split == "holdout" and all_rows:
+        # outcomes were actually GRADED -> the holdout is burned, whatever
+        # the result (review P2: fits alone consume no holdout outcomes;
+        # only graded rows do)
         entry = {"date": datetime.now(timezone.utc).date().isoformat(),
                  "run_id": run_id,
                  "candidate_config_sha": manifest["candidate_config_sha"],
                  "incumbent_config_sha": manifest["incumbent_config_sha"],
                  "sweep_family": cand_cfg.get("sweep_family"),
+                 "nominated_by_run_id": nominated_by,
                  "event_set_sha": manifest["event_set_sha"],
-                 "n_events": len(chosen),
+                 "n_events": len([s for s in summaries if s["n_graded"]]),
+                 "n_matches": len(all_rows),
                  "result": verdict_out["verdict"]}
         with open(burn_log, "a") as f:
             f.write(json.dumps(entry, sort_keys=True) + "\n")
@@ -1020,7 +1108,11 @@ def main():
     ap.add_argument("--replay", metavar="CANDIDATE_JSON",
                     help="candidate engine config to replay vs the incumbent")
     ap.add_argument("--holdout", action="store_true",
-                    help="run the HOLDOUT split (burns it - logged)")
+                    help="run the HOLDOUT split (burns it - logged); "
+                         "requires --nominee-from")
+    ap.add_argument("--nominee-from", metavar="RUN_ID", default=None,
+                    help="run_id of the DEV-SCREENED dev run that "
+                         "nominated this candidate (holdout runs only)")
     ap.add_argument("--incumbent", default=None,
                     help="incumbent config (default: incumbent_v0.json)")
     ap.add_argument("--harness-config", default=None,
@@ -1039,12 +1131,16 @@ def main():
         raise SystemExit(0 if st["ok"] else 1)
     if not args.replay:
         ap.error("--replay CANDIDATE_JSON required (or --self-test)")
+    if args.holdout and args.limit is not None:
+        ap.error("--holdout cannot be combined with --limit (a partial "
+                 "touch burns the reserve while proving nothing)")
 
     out = run_replay(args.db, args.replay,
                      incumbent_path=args.incumbent,
                      harness_path=args.harness_config,
                      split="holdout" if args.holdout else "dev",
-                     limit=args.limit)
+                     limit=args.limit,
+                     nominated_by=args.nominee_from)
     v = out["verdict"]
     print(f"run {out['run_id']}  split={v['split']}  -> {out['run_dir']}")
     print(f"VERDICT: {v['verdict']}")

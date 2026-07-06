@@ -476,6 +476,25 @@ class TestFitCache(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(first, second)
 
+    def test_corrupt_or_legacy_cache_file_recomputed(self):
+        # Codex W6b review P1: a well-keyed but stale/corrupt cache file
+        # must be treated as a miss, not served
+        calls = []
+        def fit_fn():
+            calls.append(1)
+            return {"1": 1010.5}
+        with tempfile.TemporaryDirectory() as tmp:
+            legacy = Path(tmp) / "k1.json"
+            legacy.write_text('{"1": 555.0}')     # pre-envelope format
+            got = cached_fit(Path(tmp), "k1", fit_fn)
+            self.assertEqual(got, {"1": 1010.5})
+            self.assertEqual(len(calls), 1)
+            corrupt = Path(tmp) / "k2.json"
+            corrupt.write_text("{not json")
+            got2 = cached_fit(Path(tmp), "k2", fit_fn)
+            self.assertEqual(got2, {"1": 1010.5})
+            self.assertEqual(len(calls), 2)
+
 
 # -- t quantile + paired stats (spec 5.1) -------------------------------------------
 class TestTQuantile(unittest.TestCase):
@@ -833,16 +852,23 @@ class TestRunReplay(ReplayFixture):
         self.assertIn("fit_cache_keys", m)
         self.assertEqual(out["run_id"], canonical_sha(m)[:16])
 
+    FILES = ("manifest.json", "verdict.json", "rows.jsonl",
+             "events.jsonl", "failures.jsonl")
+
     def test_manifest_determinism_two_runs_identical_bytes(self):
+        # Codex W6b review P2: equal run_ids mean the same run_dir, so the
+        # bytes must be CAPTURED between runs or the comparison is vacuous
+        # (second run overwrites the first).
         db = self.blessed_db()
         with mock.patch("harness._src_dirty", return_value=False), \
              mock.patch("harness._git_sha", return_value="abc1234"):
             a = self.run_it(db)
+            first = {f: (Path(a["run_dir"]) / f).read_bytes()
+                     for f in self.FILES}
             b = self.run_it(db)
         self.assertEqual(a["run_id"], b["run_id"])
-        for f in ("manifest.json", "verdict.json", "rows.jsonl",
-                  "events.jsonl", "failures.jsonl"):
-            self.assertEqual((Path(a["run_dir"]) / f).read_bytes(),
+        for f in self.FILES:
+            self.assertEqual(first[f],
                              (Path(b["run_dir"]) / f).read_bytes(), f)
 
     def test_bad_audit_stamp_blocks(self):
@@ -902,17 +928,79 @@ class TestRunReplay(ReplayFixture):
         self.assertEqual(v["verdict"], "INCONCLUSIVE")   # still computed
         self.assertFalse(v["adoption_eligible"])
 
-    def test_holdout_run_appends_burn_log(self):
+    def holdout_cfg_path(self):
         # move the split so both fixture events land in HOLDOUT
         cfg = json.loads(self.hpath.read_text())
         cfg["holdout_split"] = "2026-01-01"
         hpath = self.root / "harness_holdout.json"
         hpath.write_text(json.dumps(cfg))
+        return hpath
+
+    def forged_dev_screening(self, hpath):
+        """A real dev run whose recorded verdict is then forged to
+        DEV-SCREENED (and its harness sha aligned to the holdout config):
+        the holdout gate verifies nominee provenance from the run DIR - it
+        defends against workflow mistakes, not filesystem tampering - and
+        the screening statistics themselves are tested elsewhere. Returns
+        the nominee run_id."""
+        # dev split is empty under the holdout cfg; use the normal cfg run
+        with mock.patch("harness._src_dirty", return_value=False), \
+             mock.patch("harness._git_sha", return_value="abc1234"):
+            dev = self.run_it(self.blessed_db())
+        vpath = Path(dev["run_dir"]) / "verdict.json"
+        v = json.loads(vpath.read_text())
+        v["verdict"] = "DEV-SCREENED"
+        vpath.write_text(json.dumps(v, sort_keys=True, indent=2) + "\n")
+        mpath = Path(dev["run_dir"]) / "manifest.json"
+        m = json.loads(mpath.read_text())
+        m["harness_config_sha"] = config_sha(json.loads(
+            Path(hpath).read_text()))
+        mpath.write_text(json.dumps(m, sort_keys=True, indent=2) + "\n")
+        return dev["run_id"]
+
+    def test_holdout_requires_nominee_provenance(self):
+        # Codex W6b review P1: bare --holdout must never mint ADOPTED
+        out = self.run_it(self.blessed_db(),
+                          harness_path=self.holdout_cfg_path(),
+                          split="holdout")
+        v = json.loads((Path(out["run_dir"]) / "verdict.json").read_text())
+        self.assertEqual(v["verdict"], "BLOCKED")
+        self.assertTrue(any("nominee" in g for g in v["blocked_gates"]))
+
+    def test_holdout_rejects_unscreened_nominee(self):
+        hpath = self.holdout_cfg_path()
+        with mock.patch("harness._src_dirty", return_value=False), \
+             mock.patch("harness._git_sha", return_value="abc1234"):
+            dev = self.run_it(self.blessed_db())     # INCONCLUSIVE, not forged
+        out = self.run_it(self.blessed_db(), harness_path=hpath,
+                          split="holdout", nominated_by=dev["run_id"])
+        v = json.loads((Path(out["run_dir"]) / "verdict.json").read_text())
+        self.assertEqual(v["verdict"], "BLOCKED")
+
+    def test_holdout_rejects_candidate_mismatch(self):
+        hpath = self.holdout_cfg_path()
+        nominee = self.forged_dev_screening(hpath)
+        other = json.loads(self.cpath.read_text())
+        other["model"] = dict(other["model"], sigma=70)
+        opath = self.root / "other.json"
+        opath.write_text(json.dumps(other))
+        db = self.blessed_db()
+        out = run_replay(db, opath, harness_path=hpath, split="holdout",
+                         nominated_by=nominee, run_root=self.root / "runs",
+                         cache_dir=self.root / "cache",
+                         burn_log=self.root / "burn.jsonl")
+        v = json.loads((Path(out["run_dir"]) / "verdict.json").read_text())
+        self.assertEqual(v["verdict"], "BLOCKED")
+
+    def test_holdout_with_valid_nominee_runs_and_burns(self):
+        hpath = self.holdout_cfg_path()
+        nominee = self.forged_dev_screening(hpath)
         burn = self.root / "burn.jsonl"
         with mock.patch("harness._src_dirty", return_value=False), \
              mock.patch("harness._git_sha", return_value="abc1234"):
             out = self.run_it(self.blessed_db(), harness_path=hpath,
-                              split="holdout", burn_log=burn)
+                              split="holdout", nominated_by=nominee,
+                              burn_log=burn)
         v = json.loads((Path(out["run_dir"]) / "verdict.json").read_text())
         # sigma-60-vs-50 will not confirm on 2 events; INCONCLUSIVE, and
         # the holdout is burned REGARDLESS of outcome
@@ -922,10 +1010,77 @@ class TestRunReplay(ReplayFixture):
         self.assertEqual(entry["candidate_config_sha"],
                          config_sha(json.loads(self.cpath.read_text())))
         self.assertEqual(entry["result"], v["verdict"])
+        self.assertEqual(entry["nominated_by_run_id"], nominee)
+        self.assertGreater(entry["n_matches"], 0)
         self.assertIn("event_set_sha", entry)
         self.assertIn("date", entry)
         m = json.loads((Path(out["run_dir"]) / "manifest.json").read_text())
         self.assertTrue(m["holdout_touched"])
+        self.assertEqual(m["nominated_by_run_id"], nominee)
+
+    def test_holdout_not_burned_when_nothing_graded(self):
+        # Codex W6b review P2: all rows skipped -> no holdout outcome was
+        # consumed -> no burn entry
+        hpath = self.holdout_cfg_path()
+        cfg = json.loads(hpath.read_text())
+        cfg["fit_universe"] = dict(cfg["fit_universe"], min_obs=999)
+        hpath2 = self.root / "harness_minobs.json"
+        hpath2.write_text(json.dumps(cfg))
+        nominee = self.forged_dev_screening(hpath2)
+        burn = self.root / "burn_none.jsonl"
+        out = self.run_it(self.blessed_db(), harness_path=hpath2,
+                          split="holdout", nominated_by=nominee,
+                          burn_log=burn)
+        v = json.loads((Path(out["run_dir"]) / "verdict.json").read_text())
+        self.assertEqual(v["verdict"], "BLOCKED")   # post-coverage min_events
+        self.assertFalse(burn.exists())
+
+    def test_holdout_cannot_be_limited(self):
+        with self.assertRaises(HarnessError):
+            self.run_it(self.blessed_db(),
+                        harness_path=self.holdout_cfg_path(),
+                        split="holdout", limit=1)
+
+    def test_limited_run_is_exploratory_never_verdict_bearing(self):
+        # Codex W6b review P1: a --limit subset must never emit a
+        # screening-grade verdict nor be adoption-eligible
+        with mock.patch("harness._src_dirty", return_value=False), \
+             mock.patch("harness._git_sha", return_value="abc1234"):
+            out = self.run_it(self.blessed_db(), limit=2)
+        v = json.loads((Path(out["run_dir"]) / "verdict.json").read_text())
+        self.assertEqual(v["verdict"], "EXPLORATORY")
+        self.assertFalse(v["adoption_eligible"])
+        self.assertIn("stats", v)                   # evidence still shown
+
+    def test_placeholder_in_config_kills_adoption_eligibility(self):
+        # Codex W6b review P2: placeholders hidden behind config shas
+        cand = json.loads(self.cpath.read_text())
+        cand["source_hash"] = "pending-fit-audit"
+        cand["expected_diff_paths"] = ["model.sigma", "source_hash"]
+        cpath = self.root / "cand_pending.json"
+        cpath.write_text(json.dumps(cand))
+        db = self.blessed_db()
+        with mock.patch("harness._src_dirty", return_value=False), \
+             mock.patch("harness._git_sha", return_value="abc1234"):
+            out = run_replay(db, cpath, harness_path=self.hpath,
+                             run_root=self.root / "runs",
+                             cache_dir=self.root / "cache",
+                             burn_log=self.root / "burn.jsonl")
+        v = json.loads((Path(out["run_dir"]) / "verdict.json").read_text())
+        self.assertNotEqual(v["verdict"], "BLOCKED")
+        self.assertFalse(v["adoption_eligible"])
+
+    def test_manifest_pins_cached_ratings_content(self):
+        # Codex W6b review P1: the manifest must pin WHAT the cache served,
+        # not just the key
+        with mock.patch("harness._src_dirty", return_value=False), \
+             mock.patch("harness._git_sha", return_value="abc1234"):
+            out = self.run_it(self.blessed_db())
+        m = json.loads((Path(out["run_dir"]) / "manifest.json").read_text())
+        for tid, keys in m["fit_cache_keys"].items():
+            for tag in ("cand", "inc"):
+                self.assertIn("key", keys[tag])
+                self.assertEqual(len(keys[tag]["ratings_sha"]), 64, tid)
 
 
 # -- configs (spec 3.1: committed, declared before replay) ----------------------------
