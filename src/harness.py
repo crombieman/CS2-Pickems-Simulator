@@ -51,13 +51,20 @@ BURN_LOG = HARNESS_DIR / "holdout_burn_log.jsonl"   # committed (spec 5.3)
 
 # Candidacy bookkeeping fields excluded from the config diff (they differ
 # by construction and are not knob changes; spec 3.1/3.2.7).
-IDENTITY_FIELDS = ("name", "knob_id", "expected_diff_paths", "sweep_family")
+IDENTITY_FIELDS = ("name", "knob_id", "expected_diff_paths", "sweep_family",
+                   "screens_against")
+
+# Omitted-argument defaults for gated runs: the ADOPTED reference. Flipped
+# only by adoption commits (sigma-85, run 5d14e8b9b8a5e486, 2026-07-05/06).
+DEFAULT_INCUMBENT = HARNESS_DIR / "configs" / "incumbent_v1.json"
+DEFAULT_HARNESS = HARNESS_DIR / "configs" / "harness_v1.json"
 
 HARNESS_VERSION = "v0:event-scoped-walkforward+paired-events"
 # Bump whenever fit-path code semantics change (the PARSE_VERSION idiom).
 # Part of every fit-cache key, so stale fits are structurally unreachable.
-# v0.1: convergence-stop added to the fit path (ship-gate oscillation fix).
-FIT_CODE_VERSION = "fit-v0.1:bt-flat-uniform+converge-stop"
+# v0.1: convergence-stop added (ship-gate oscillation fix). v1: W7/W8 schemes
+# (tier priors now leave-one-out, weighted, staleness) - F-tier review bump.
+FIT_CODE_VERSION = "fit-v1:bt+tier-loo+weighted+staleness"
 
 
 class HarnessError(RuntimeError):
@@ -285,6 +292,14 @@ def fit_engine(engine_cfg, universe_info):
         hl = weighting.get("half_life_days")
         bo1 = float(weighting.get("bo1_discount", 1.0))
         b_dt = datetime.fromisoformat(universe_info["boundary_utc"])
+        if len(universe_info["fit_matches"]) != len(
+                universe_info["fit_match_meta"]):
+            # review P2: zip truncation would silently drop matches while
+            # the cache key and manifest still claim all of them
+            raise HarnessError(
+                f"fit_matches/fit_match_meta misaligned: "
+                f"{len(universe_info['fit_matches'])} vs "
+                f"{len(universe_info['fit_match_meta'])}")
         matches = []
         for (w, l, _wt), meta in zip(universe_info["fit_matches"],
                                      universe_info["fit_match_meta"]):
@@ -329,18 +344,34 @@ def fit_engine(engine_cfg, universe_info):
         return fit({t: base for t in universe})
     if scheme == "tier-empirical-2pass":
         flat = fit({t: base for t in universe})
-        team_tiers = universe_info["team_tiers"]
-        by_tier = {}
-        for t in universe:
-            mt = _modal_tier(team_tiers.get(t, {}))
-            if mt is not None:
-                by_tier.setdefault(mt, []).append(flat[t])
-        tier_means = {k: sum(v) / len(v) for k, v in by_tier.items()}
-        priors = {t: tier_means.get(_modal_tier(team_tiers.get(t, {})), base)
-                  for t in universe}
+        priors = _tier_loo_priors(flat, universe_info["team_tiers"],
+                                  universe, base)
         return fit(priors)
     raise HarnessError(f"unknown priors_scheme {scheme!r} "
                        f"(supported: flat1000, tier-empirical-2pass)")
+
+
+def _tier_loo_priors(flat, team_tiers, universe, base):
+    """Leave-one-out tier-mean priors (Codex F-tier review P2: including a
+    team's own pass-1 rating in its own prior double-counts its window data
+    as likelihood AND prior evidence; a singleton tier would echo the team's
+    own rating back as its prior). Each team's prior = the mean of the OTHER
+    teams sharing its modal tier; no others -> base."""
+    modal = {t: _modal_tier(team_tiers.get(t, {})) for t in universe}
+    sums, counts = {}, {}
+    for t in universe:
+        mt = modal[t]
+        if mt is not None:
+            sums[mt] = sums.get(mt, 0.0) + flat[t]
+            counts[mt] = counts.get(mt, 0) + 1
+    priors = {}
+    for t in universe:
+        mt = modal[t]
+        if mt is None or counts[mt] < 2:
+            priors[t] = base
+        else:
+            priors[t] = (sums[mt] - flat[t]) / (counts[mt] - 1)
+    return priors
 
 
 def fit_cache_key(engine_config_sha, universe, fit_match_ids, window_spec,
@@ -772,6 +803,26 @@ def gate_holdout_nominee(nominated_by, run_root, cand_sha, inc_sha,
         if not ok:
             raise HarnessError(
                 f"gate holdout-nominee ({nominated_by}): {why}")
+
+
+def gate_screens_against(cand_cfg, incumbent_cfg):
+    """Codex F-tier review P2: a family registered against one incumbent
+    must never silently re-screen against a different one (the default
+    incumbent moves with adoptions). Candidates registered from 2026-07-06
+    declare screens_against {config, sha}; if present, the actual
+    incumbent's canonical sha must match. Legacy families (registered
+    earlier, runs already recorded) pass ungated - their config files are
+    frozen history and editing them would break recorded sha linkage."""
+    decl = cand_cfg.get("screens_against")
+    if not decl:
+        return
+    actual = config_sha(incumbent_cfg)
+    if decl.get("sha") != actual:
+        raise HarnessError(
+            f"gate screens-against: candidate registered against "
+            f"{decl.get('config')!r} (sha {str(decl.get('sha'))[:12]}...) "
+            f"but this run's incumbent sha is {actual[:12]}... - rerun "
+            f"with the declared incumbent or re-register the family")
 
 
 def gate_config_diff(cand_cfg, inc_cfg):
@@ -1247,12 +1298,12 @@ def run_replay(db_path, candidate_path, *, incumbent_path=None,
             "a holdout run cannot be limited: a partial touch still burns "
             "the reserve while proving nothing (spec 5.3)")
     candidate_path = Path(candidate_path)
-    # Defaults track the ADOPTED reference: incumbent_v1 = sigma-85
-    # (f-sigma-v1 holdout confirmation, run 5d14e8b9b8a5e486, 2026-07-05)
-    # and harness_v1 = the post-burn reserve rotation (holdout split
-    # 2026-01-01). v0 files stay committed for provenance.
-    incumbent_path = Path(incumbent_path or CONFIGS_DIR / "incumbent_v1.json")
-    harness_path = Path(harness_path or CONFIGS_DIR / "harness_v1.json")
+    # Defaults track the ADOPTED reference (see DEFAULT_* constants):
+    # incumbent_v1 = sigma-85 (f-sigma-v1 holdout confirmation, run
+    # 5d14e8b9b8a5e486) and harness_v1 = the post-burn reserve rotation
+    # (holdout split 2026-01-01). v0 files stay committed for provenance.
+    incumbent_path = Path(incumbent_path or DEFAULT_INCUMBENT)
+    harness_path = Path(harness_path or DEFAULT_HARNESS)
     baseline_paths = [Path(p) for p in
                       (baseline_paths if baseline_paths is not None
                        else [CONFIGS_DIR / "baseline_uniform.json"])]
@@ -1279,6 +1330,10 @@ def run_replay(db_path, candidate_path, *, incumbent_path=None,
         blocked_gates.append(str(e))
     try:
         gate_config_diff(cand_cfg, inc_cfg)
+    except HarnessError as e:
+        blocked_gates.append(str(e))
+    try:
+        gate_screens_against(cand_cfg, inc_cfg)
     except HarnessError as e:
         blocked_gates.append(str(e))
     rows, substrate, meta, aliases = _load_substrate(db_path)
@@ -1462,9 +1517,10 @@ def main():
                     help="run_id of the DEV-SCREENED dev run that "
                          "nominated this candidate (holdout runs only)")
     ap.add_argument("--incumbent", default=None,
-                    help="incumbent config (default: incumbent_v0.json)")
+                    help=f"incumbent config (default: "
+                         f"{DEFAULT_INCUMBENT.name})")
     ap.add_argument("--harness-config", default=None,
-                    help="harness config (default: harness_v0.json)")
+                    help=f"harness config (default: {DEFAULT_HARNESS.name})")
     ap.add_argument("--db", default=str(DB_PATH))
     ap.add_argument("--limit", type=int, default=None,
                     help="exploratory: first N events only")

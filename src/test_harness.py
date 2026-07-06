@@ -722,8 +722,35 @@ class TestDiffPaths(unittest.TestCase):
         a = {"name": "inc", "knob_id": None, "expected_diff_paths": [],
              "sweep_family": None, "model": {"sigma": 50}}
         b = {"name": "cand", "knob_id": "k", "expected_diff_paths": ["x"],
-             "sweep_family": "f", "model": {"sigma": 50}}
+             "sweep_family": "f", "model": {"sigma": 50},
+             "screens_against": {"config": "incumbent_v1.json", "sha": "x"}}
         self.assertEqual(diff_paths(a, b), [])
+
+
+class TestGateScreensAgainst(unittest.TestCase):
+    """Codex F-tier review P2: a family registered against one incumbent
+    must never silently re-screen against a different one."""
+
+    def test_matching_declaration_passes(self):
+        from harness import gate_screens_against
+        inc = load_config(CONFIGS / "incumbent_v1.json")
+        cand = {"screens_against": {"config": "incumbent_v1.json",
+                                    "sha": config_sha(inc)}}
+        gate_screens_against(cand, inc)          # no raise
+
+    def test_mismatched_incumbent_blocks(self):
+        from harness import gate_screens_against
+        inc_v0 = load_config(CONFIGS / "incumbent_v0.json")
+        inc_v1 = load_config(CONFIGS / "incumbent_v1.json")
+        cand = {"screens_against": {"config": "incumbent_v0.json",
+                                    "sha": config_sha(inc_v0)}}
+        with self.assertRaises(HarnessError):
+            gate_screens_against(cand, inc_v1)
+
+    def test_legacy_configs_without_declaration_pass(self):
+        from harness import gate_screens_against
+        inc = load_config(CONFIGS / "incumbent_v1.json")
+        gate_screens_against({"name": "old-family-variant"}, inc)
 
 
 class TestGateConfigDiff(unittest.TestCase):
@@ -1295,6 +1322,9 @@ class TestConfigs(unittest.TestCase):
         self.assertEqual(h1["reserve_split"], "2026-07-01")
         h0 = load_config(CONFIGS / "harness_v0.json")
         self.assertEqual(h0["holdout_split"], "2025-07-01")  # frozen history
+        # the omitted-argument defaults themselves are pinned (review P3)
+        self.assertEqual(harness.DEFAULT_INCUMBENT.name, "incumbent_v1.json")
+        self.assertEqual(harness.DEFAULT_HARNESS.name, "harness_v1.json")
 
     def test_cologne_event_config_pins_substrate_tournament(self):
         # W6c: the slate arm links EventConfig -> substrate via tournament_id
@@ -1345,6 +1375,28 @@ class TestFitEngine(unittest.TestCase):
         self.assertGreater(hier["5"], flat["5"])
         # determinism
         self.assertEqual(hier, fit_engine(eng, u))
+
+    def test_tier_loo_priors_exclude_self_and_singletons(self):
+        # Codex F-tier review P2: a team's own pass-1 rating must not feed
+        # its own prior (double-counting); singleton tiers fall back to base
+        from harness import _tier_loo_priors
+        flat = {"1": 1100.0, "2": 1060.0, "5": 990.0}
+        tiers = {"1": {"s": 5}, "2": {"s": 5}, "5": {"a": 3}}
+        priors = _tier_loo_priors(flat, tiers, ["1", "2", "5"], 1000.0)
+        self.assertEqual(priors["1"], 1060.0)    # mean of OTHERS in tier s
+        self.assertEqual(priors["2"], 1100.0)
+        self.assertEqual(priors["5"], 1000.0)    # singleton tier -> base
+
+    def test_weighted_meta_misalignment_fails_loud(self):
+        # Codex F-tier review P2: zip truncation must never drop matches
+        eng = load_config(CONFIGS / "incumbent_v0.json")
+        eng = dict(eng, data_prep={"weighting": {
+            "scheme": "weighted", "half_life_days": 180,
+            "bo1_discount": 1.0}})
+        u = self.weighted_universe()
+        u["fit_match_meta"] = u["fit_match_meta"][:1]
+        with self.assertRaises(HarnessError):
+            fit_engine(eng, u)
 
     def test_tier_empirical_handles_unknown_tier_teams(self):
         eng = load_config(CONFIGS / "incumbent_v0.json")

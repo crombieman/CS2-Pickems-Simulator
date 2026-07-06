@@ -26,5 +26,9 @@
     "eval_window": null,
     "budget_ref": null
   },
-  "sweep_family": "f4-staleness-v2"
+  "sweep_family": "f4-staleness-v2",
+  "screens_against": {
+    "config": "incumbent_v1.json",
+    "sha": "583908e12c9e8ca52d81a9eefc73750410ae738e5362c4412a6bd97e8c2b532b"
+  }
 }
