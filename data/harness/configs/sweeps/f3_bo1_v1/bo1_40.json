@@ -1,0 +1,31 @@
+{
+  "name": "f3-bo1-40",
+  "knob_id": "f3.bo1-discount",
+  "expected_diff_paths": [
+    "data_prep.weighting"
+  ],
+  "model": {
+    "priors_scheme": "flat1000",
+    "prior_mean": 1000,
+    "sigma": 50,
+    "iters": 4000,
+    "lr": 100.0,
+    "converge_tol": 0.01
+  },
+  "data_prep": {
+    "weighting": {
+      "scheme": "weighted",
+      "half_life_days": null,
+      "bo1_discount": 0.4
+    }
+  },
+  "market_policy": "none",
+  "sim_policy": "current",
+  "optimizer_objective": "p_ge_threshold",
+  "forward_prereg": {
+    "registered": false,
+    "eval_window": null,
+    "budget_ref": null
+  },
+  "sweep_family": "f3-bo1-v1"
+}

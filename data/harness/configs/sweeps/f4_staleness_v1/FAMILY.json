@@ -1,0 +1,16 @@
+{
+  "family_id": "f4-staleness-v1",
+  "knob_id": "f4.staleness-sigma",
+  "registered": "2026-07-05",
+  "grid": [
+    25,
+    50,
+    100
+  ],
+  "incumbent_reference": {
+    "staleness": null
+  },
+  "motivation": "Master spec W8/F4: Glicko-style prior-sigma inflation for idle teams.",
+  "disclosure": "No prior peeks.",
+  "protocol": "Dev screening; select_nominee; holdout only on explicit go."
+}

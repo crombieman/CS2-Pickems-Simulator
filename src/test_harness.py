@@ -366,6 +366,23 @@ class TestBuildFitUniverse(unittest.TestCase):
         self.assertEqual(u["team_tiers"]["3"], {"s": 1, "a": 1})
         self.assertEqual(u["team_tiers"].get("2", {}), {})
 
+    def test_fit_match_meta_and_boundary_for_weighting(self):
+        # W8/F2-F3: per-fit-match age/bo_type inputs + the boundary they
+        # age against, all UTC-normalized
+        win = [row(1, t1=1, t2=3, start="2023-01-01T10:00:00+00:00"),
+               row(2, t1=2, t2=3, start="2023-06-01T10:00:00+00:00")]
+        win[1]["bo_type"] = 1
+        u = build_fit_universe(self.ev_rows, win, hops=1)
+        self.assertEqual(u["boundary_utc"], "2024-01-01T10:00:00")
+        self.assertEqual(len(u["fit_match_meta"]), len(u["fit_matches"]))
+        self.assertEqual(u["fit_match_meta"][0],
+                         {"start_utc": "2023-01-01T10:00:00", "bo_type": 3})
+        self.assertEqual(u["fit_match_meta"][1],
+                         {"start_utc": "2023-06-01T10:00:00", "bo_type": 1})
+        # W8/F4: last window activity per team
+        self.assertEqual(u["team_last_start"]["3"], "2023-06-01T10:00:00")
+        self.assertEqual(u["team_last_start"]["1"], "2023-01-01T10:00:00")
+
 
 # -- temporal leakage assertion (spec 3.2.4) --------------------------------------
 class TestLeakage(unittest.TestCase):
@@ -1331,6 +1348,69 @@ class TestFitEngine(unittest.TestCase):
         bad2 = dict(eng, model=dict(eng["model"], priors_scheme="tiered"))
         with self.assertRaises(HarnessError):
             fit_engine(bad2, u)
+        bad3 = dict(eng, data_prep={"weighting": {"scheme": "mystery"}})
+        with self.assertRaises(HarnessError):
+            fit_engine(bad3, u)
+
+    def weighted_universe(self):
+        # team 1 beat 2 long ago; team 2 beat 1 recently (equal counts)
+        return {"universe": {"1", "2"},
+                "fit_matches": [("1", "2", 1.0), ("2", "1", 1.0)],
+                "fit_match_ids": [10, 11],
+                "boundary_utc": "2024-01-01T00:00:00",
+                "fit_match_meta": [
+                    {"start_utc": "2022-01-01T00:00:00", "bo_type": 3},
+                    {"start_utc": "2023-12-01T00:00:00", "bo_type": 3}],
+                "team_tiers": {}, "team_last_start": {}}
+
+    def test_halflife_weighting_favors_recent_results(self):
+        # W8/F2: uniform weights tie 1-1 -> ratings equal; decay makes the
+        # recent win (team 2) dominate
+        eng = load_config(CONFIGS / "incumbent_v0.json")
+        u = self.weighted_universe()
+        flat = fit_engine(eng, u)
+        self.assertAlmostEqual(flat["1"], flat["2"], places=6)
+        decayed = dict(eng, data_prep={"weighting": {
+            "scheme": "weighted", "half_life_days": 180,
+            "bo1_discount": 1.0}})
+        r = fit_engine(decayed, u)
+        self.assertGreater(r["2"], r["1"])
+
+    def test_bo1_discount_downweights_bo1s(self):
+        # W8/F3: same two results, but the recent win is a BO1; discounting
+        # it must flip the advantage back toward the older BO3 win
+        eng = load_config(CONFIGS / "incumbent_v0.json")
+        u = self.weighted_universe()
+        u["fit_match_meta"][1]["bo_type"] = 1
+        no_decay = dict(eng, data_prep={"weighting": {
+            "scheme": "weighted", "half_life_days": None,
+            "bo1_discount": 0.5}})
+        r = fit_engine(no_decay, u)
+        self.assertGreater(r["1"], r["2"])
+
+    def test_staleness_sigma_loosens_stale_teams(self):
+        # W8/F4: teams 1 (stale, won long ago) and 2 (fresh, won recently)
+        # each beat shared opponent 3 once at uniform weight. Symmetric
+        # without staleness; WITH it the stale team's weaker prior pin lets
+        # the same evidence move it further.
+        eng = load_config(CONFIGS / "incumbent_v0.json")
+        u = {"universe": {"1", "2", "3"},
+             "fit_matches": [("1", "3", 1.0), ("2", "3", 1.0)],
+             "fit_match_ids": [10, 11],
+             "boundary_utc": "2024-01-01T00:00:00",
+             "fit_match_meta": [
+                 {"start_utc": "2023-01-01T00:00:00", "bo_type": 3},
+                 {"start_utc": "2023-12-25T00:00:00", "bo_type": 3}],
+             "team_tiers": {},
+             "team_last_start": {"1": "2023-01-01T00:00:00",
+                                 "2": "2023-12-25T00:00:00",
+                                 "3": "2023-12-25T00:00:00"}}
+        base = fit_engine(eng, u)
+        self.assertAlmostEqual(base["1"], base["2"], places=6)
+        cfg = dict(eng, model=dict(eng["model"],
+                                   staleness={"sigma_per_year": 100}))
+        r = fit_engine(cfg, u)
+        self.assertGreater(r["1"], r["2"])
 
 
 if __name__ == "__main__":

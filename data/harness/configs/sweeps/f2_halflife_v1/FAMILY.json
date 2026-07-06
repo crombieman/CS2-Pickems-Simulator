@@ -1,0 +1,17 @@
+{
+  "family_id": "f2-halflife-v1",
+  "knob_id": "f2.recency-halflife",
+  "registered": "2026-07-05",
+  "grid": [
+    90,
+    180,
+    365,
+    730
+  ],
+  "incumbent_reference": {
+    "weighting": "uniform"
+  },
+  "motivation": "Master spec W8/F2: replace the hand-set recency buckets with an estimated half-life.",
+  "disclosure": "No prior peeks.",
+  "protocol": "Dev screening; select_nominee; holdout only on explicit go."
+}

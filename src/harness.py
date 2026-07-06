@@ -194,7 +194,7 @@ def build_fit_universe(event_rows, window_rows, hops=1):
         universe |= nxt
         frontier = nxt
     fit_matches, fit_ids, counts = [], [], {}
-    team_tiers = {}
+    team_tiers, team_last, fit_meta = {}, {}, []
     for r in sorted(window_rows, key=lambda x: x["match_id"]):
         a, b = str(r["team1_id"]), str(r["team2_id"])
         if a not in universe or b not in universe:
@@ -205,16 +205,26 @@ def build_fit_universe(event_rows, window_rows, hops=1):
                                f"{r['winner_team_id']} is neither side")
         fit_matches.append((w, b if w == a else a, 1.0))
         fit_ids.append(r["match_id"])
+        su = utc_key(r["start_date"])
+        # per-match age/format inputs for W8's weighting knobs (F2/F3) and
+        # per-team last activity for staleness sigma (F4) - all window-only
+        fit_meta.append({"start_utc": su, "bo_type": r["bo_type"]})
         counts[a] = counts.get(a, 0) + 1
         counts[b] = counts.get(b, 0) + 1
+        for t in (a, b):
+            if t not in team_last or su > team_last[t]:
+                team_last[t] = su
         if r["tier"] is not None:
             # per-team tier exposure (W7/F1 hierarchical priors), window-only
             for t in (a, b):
                 team_tiers.setdefault(t, {})
                 team_tiers[t][r["tier"]] = team_tiers[t].get(r["tier"], 0) + 1
+    boundary_utc = min(utc_key(r["start_date"]) for r in event_rows)
     return {"universe": universe, "participants": participants,
             "fit_matches": fit_matches, "fit_match_ids": fit_ids,
-            "window_counts": counts, "team_tiers": team_tiers}
+            "fit_match_meta": fit_meta, "boundary_utc": boundary_utc,
+            "window_counts": counts, "team_tiers": team_tiers,
+            "team_last_start": team_last}
 
 
 def assert_no_leakage(fit_rows, graded_rows, boundary):
@@ -263,22 +273,57 @@ def fit_engine(engine_cfg, universe_info):
     references STAGE3_TEAMS)."""
     model_cfg = engine_cfg["model"]
     scheme = model_cfg["priors_scheme"]
-    if engine_cfg["data_prep"]["weighting"] != "uniform":
-        raise HarnessError(f"unknown weighting "
-                           f"{engine_cfg['data_prep']['weighting']!r} "
-                           f"(v0: uniform)")
     universe = sorted(universe_info["universe"])
     base = float(model_cfg["prior_mean"])
     sigma = float(model_cfg["sigma"])
 
+    # -- data-prep weighting (W8/F2 half-life + F3 BO1 discount) --
+    weighting = engine_cfg["data_prep"]["weighting"]
+    if weighting == "uniform":
+        matches = universe_info["fit_matches"]
+    elif isinstance(weighting, dict) and weighting.get("scheme") == "weighted":
+        hl = weighting.get("half_life_days")
+        bo1 = float(weighting.get("bo1_discount", 1.0))
+        b_dt = datetime.fromisoformat(universe_info["boundary_utc"])
+        matches = []
+        for (w, l, _wt), meta in zip(universe_info["fit_matches"],
+                                     universe_info["fit_match_meta"]):
+            wt = 1.0
+            if hl is not None:
+                age_days = ((b_dt - datetime.fromisoformat(meta["start_utc"]))
+                            .total_seconds() / 86400.0)
+                wt *= 0.5 ** (age_days / float(hl))
+            if meta["bo_type"] == 1:
+                wt *= bo1
+            matches.append((w, l, wt))
+    else:
+        raise HarnessError(f"unknown weighting {weighting!r} "
+                           f"(supported: uniform, "
+                           f"{{scheme: weighted, ...}})")
+
+    # -- staleness-inflated prior sigma (W8/F4, Glicko-flavored) --
+    sigma_by_team = None
+    staleness = model_cfg.get("staleness")
+    if staleness is not None:
+        rate = float(staleness["sigma_per_year"])
+        b_dt = datetime.fromisoformat(universe_info["boundary_utc"])
+        last = universe_info["team_last_start"]
+        sigma_by_team = {}
+        for t in universe:
+            if t in last:   # no-window-match teams sit at their prior anyway
+                years = ((b_dt - datetime.fromisoformat(last[t]))
+                         .total_seconds() / (86400.0 * 365.0))
+                sigma_by_team[t] = sigma + rate * years
+
     def fit(priors):
-        return fit_bradley_terry(universe_info["fit_matches"],
+        return fit_bradley_terry(matches,
                                  priors=priors,
                                  sigma_s3=sigma, sigma_other=sigma,
                                  iters=model_cfg["iters"],
                                  lr=model_cfg["lr"],
                                  recenter_on=universe,
-                                 converge_tol=model_cfg.get("converge_tol"))
+                                 converge_tol=model_cfg.get("converge_tol"),
+                                 sigma_by_team=sigma_by_team)
 
     if scheme == "flat1000":
         return fit({t: base for t in universe})

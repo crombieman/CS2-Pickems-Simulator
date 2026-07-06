@@ -60,7 +60,7 @@ def load_matches(path: Path = DATA / "matches_2026.csv"):
 
 def fit_bradley_terry(matches, priors=PRIORS, sigma_s3=70.0, sigma_other=50.0,
                       iters=4000, lr=2000.0, recenter_on=None,
-                      converge_tol=None):
+                      converge_tol=None, sigma_by_team=None):
     """MAP estimate: weighted BT log-likelihood + Gaussian prior per team.
 
     sigma controls how far data can move a team off its prior. 70 Elo for
@@ -83,9 +83,16 @@ def fit_bradley_terry(matches, priors=PRIORS, sigma_s3=70.0, sigma_other=50.0,
     2026-07-05: at lr=2000 a 300-match pair flips between two garbage
     states forever; ~8-match Cologne teams are far inside the stable
     region). None = original fixed-iteration behavior, byte-identical.
+
+    sigma_by_team: optional per-team sigma OVERRIDES on top of the
+    s3/other bucketing (W8/F4 staleness inflation: an idle team's prior
+    pin weakens with time since its last match). None = original
+    behavior, byte-identical.
     """
     ratings = dict(priors)
     sigma = {t: (sigma_s3 if t in STAGE3_TEAMS else sigma_other) for t in priors}
+    if sigma_by_team is not None:
+        sigma.update(sigma_by_team)
     max_step = None
     for _ in range(iters):
         grad = {t: 0.0 for t in priors}

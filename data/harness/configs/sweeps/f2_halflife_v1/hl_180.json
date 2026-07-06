@@ -1,0 +1,31 @@
+{
+  "name": "f2-hl-180",
+  "knob_id": "f2.recency-halflife",
+  "expected_diff_paths": [
+    "data_prep.weighting"
+  ],
+  "model": {
+    "priors_scheme": "flat1000",
+    "prior_mean": 1000,
+    "sigma": 50,
+    "iters": 4000,
+    "lr": 100.0,
+    "converge_tol": 0.01
+  },
+  "data_prep": {
+    "weighting": {
+      "scheme": "weighted",
+      "half_life_days": 180,
+      "bo1_discount": 1.0
+    }
+  },
+  "market_policy": "none",
+  "sim_policy": "current",
+  "optimizer_objective": "p_ge_threshold",
+  "forward_prereg": {
+    "registered": false,
+    "eval_window": null,
+    "budget_ref": null
+  },
+  "sweep_family": "f2-halflife-v1"
+}

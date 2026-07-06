@@ -1,0 +1,16 @@
+{
+  "family_id": "f3-bo1-v1",
+  "knob_id": "f3.bo1-discount",
+  "registered": "2026-07-05",
+  "grid": [
+    0.4,
+    0.6,
+    0.8
+  ],
+  "incumbent_reference": {
+    "weighting": "uniform"
+  },
+  "motivation": "Master spec W8/F3: BO1s are noisier evidence than BO3s; the hand-set 0.6 in matches_2026.csv becomes an estimated parameter.",
+  "disclosure": "No prior peeks.",
+  "protocol": "Dev screening; select_nominee; holdout only on explicit go."
+}
