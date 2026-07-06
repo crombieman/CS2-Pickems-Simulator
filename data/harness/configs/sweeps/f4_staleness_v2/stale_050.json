@@ -1,0 +1,30 @@
+{
+  "name": "f4v2-stale-050",
+  "knob_id": "f4.staleness-sigma",
+  "expected_diff_paths": [
+    "model.staleness"
+  ],
+  "model": {
+    "priors_scheme": "flat1000",
+    "prior_mean": 1000,
+    "sigma": 85,
+    "iters": 4000,
+    "lr": 100.0,
+    "converge_tol": 0.01,
+    "staleness": {
+      "sigma_per_year": 50
+    }
+  },
+  "data_prep": {
+    "weighting": "uniform"
+  },
+  "market_policy": "none",
+  "sim_policy": "current",
+  "optimizer_objective": "p_ge_threshold",
+  "forward_prereg": {
+    "registered": false,
+    "eval_window": null,
+    "budget_ref": null
+  },
+  "sweep_family": "f4-staleness-v2"
+}

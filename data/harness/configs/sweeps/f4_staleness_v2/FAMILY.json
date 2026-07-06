@@ -1,0 +1,19 @@
+{
+  "family_id": "f4-staleness-v2",
+  "knob_id": "f4.staleness-sigma",
+  "registered": "2026-07-06",
+  "grid": [
+    50,
+    100,
+    200,
+    400
+  ],
+  "incumbent_reference": {
+    "config": "incumbent_v1.json",
+    "sigma": 85,
+    "staleness": null
+  },
+  "motivation": "f4-staleness-v1 (vs the OLD sigma-50 incumbent) showed a monotone dev trend toward the MDE (-0.0004/-0.0008/-0.0015 at 25/50/100) without crossing it. Re-tested against the adopted incumbent_v1 (sigma 85) with a wider grid.",
+  "disclosure": "The v1 family results above were DEV-split observations only; the rotated holdout (events >= 2026-01-01 per harness_v1) has never been touched by any staleness variant. The 46 events burned for the sigma-85 adoption are now dev events by design (spec 5.3 rotation).",
+  "protocol": "Dev screening via run_replay (v1 defaults); select_nominee; holdout confirmation only on an explicit go."
+}
