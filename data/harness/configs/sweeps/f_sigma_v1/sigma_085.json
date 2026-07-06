@@ -1,0 +1,27 @@
+{
+  "name": "f-sigma-v1-085",
+  "knob_id": "f.sigma.uniform",
+  "expected_diff_paths": [
+    "model.sigma"
+  ],
+  "model": {
+    "priors_scheme": "flat1000",
+    "prior_mean": 1000,
+    "sigma": 85,
+    "iters": 4000,
+    "lr": 100.0,
+    "converge_tol": 0.01
+  },
+  "data_prep": {
+    "weighting": "uniform"
+  },
+  "market_policy": "none",
+  "sim_policy": "current",
+  "optimizer_objective": "p_ge_threshold",
+  "forward_prereg": {
+    "registered": false,
+    "eval_window": null,
+    "budget_ref": null
+  },
+  "sweep_family": "f-sigma-v1"
+}
