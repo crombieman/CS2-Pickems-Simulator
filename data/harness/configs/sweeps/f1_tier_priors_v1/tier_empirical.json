@@ -1,0 +1,27 @@
+{
+  "name": "f1-tier-empirical-2pass",
+  "knob_id": "f1.tier-priors",
+  "expected_diff_paths": [
+    "model.priors_scheme"
+  ],
+  "model": {
+    "priors_scheme": "tier-empirical-2pass",
+    "prior_mean": 1000,
+    "sigma": 50,
+    "iters": 4000,
+    "lr": 100.0,
+    "converge_tol": 0.01
+  },
+  "data_prep": {
+    "weighting": "uniform"
+  },
+  "market_policy": "none",
+  "sim_policy": "current",
+  "optimizer_objective": "p_ge_threshold",
+  "forward_prereg": {
+    "registered": false,
+    "eval_window": null,
+    "budget_ref": null
+  },
+  "sweep_family": "f1-tier-priors-v1"
+}

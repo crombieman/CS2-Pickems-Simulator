@@ -353,6 +353,19 @@ class TestBuildFitUniverse(unittest.TestCase):
         self.assertEqual(u["fit_match_ids"], [1, 2, 4])
         self.assertNotIn("5", u["universe"])
 
+    def test_team_tiers_counted_from_fit_matches(self):
+        # W7/F1: per-team tier exposure, window-only, None rows excluded
+        win = [row(1, t1=1, t2=3, tier="s",
+                   start="2023-01-01T10:00:00+00:00"),
+               row(2, t1=1, t2=3, tier="a",
+                   start="2023-02-01T10:00:00+00:00"),
+               row(3, t1=2, t2=3, tier=None,
+                   start="2023-03-01T10:00:00+00:00")]
+        u = build_fit_universe(self.ev_rows, win, hops=1)
+        self.assertEqual(u["team_tiers"]["1"], {"s": 1, "a": 1})
+        self.assertEqual(u["team_tiers"]["3"], {"s": 1, "a": 1})
+        self.assertEqual(u["team_tiers"].get("2", {}), {})
+
 
 # -- temporal leakage assertion (spec 3.2.4) --------------------------------------
 class TestLeakage(unittest.TestCase):
@@ -1273,6 +1286,39 @@ class TestFitEngine(unittest.TestCase):
         self.assertEqual(set(ratings), {"1", "2"})
         mean = sum(ratings.values()) / 2
         self.assertAlmostEqual(mean, 1000.0, places=9)
+        self.assertGreater(ratings["1"], ratings["2"])
+
+    def test_tier_empirical_2pass_pulls_thin_teams_to_tier_mean(self):
+        # W7/F1: two tier-s teams with strong window records cluster high; a
+        # THIN tier-s team (few matches) must land nearer the tier-s mean
+        # than the flat-1000 base, while a tier-b team stays near base.
+        eng = load_config(CONFIGS / "incumbent_v0.json")
+        eng = dict(eng, model=dict(eng["model"],
+                                   priors_scheme="tier-empirical-2pass"))
+        # s-tier: 1 and 2 beat b-tier 3 and 4 repeatedly; 5 is a thin s-tier
+        # team with one win over 3
+        fit_matches = ([("1", "3", 1.0)] * 6 + [("2", "4", 1.0)] * 6
+                       + [("1", "4", 1.0)] * 3 + [("2", "3", 1.0)] * 3
+                       + [("5", "3", 1.0)])
+        tiers = {"1": {"s": 9}, "2": {"s": 9}, "3": {"b": 10},
+                 "4": {"b": 9}, "5": {"s": 1}}
+        u = {"universe": {"1", "2", "3", "4", "5"},
+             "fit_matches": fit_matches, "fit_match_ids": list(range(19)),
+             "team_tiers": tiers}
+        hier = fit_engine(eng, u)
+        flat = fit_engine(load_config(CONFIGS / "incumbent_v0.json"), u)
+        # tier-s mean sits above base; the thin s-team must benefit
+        self.assertGreater(hier["5"], flat["5"])
+        # determinism
+        self.assertEqual(hier, fit_engine(eng, u))
+
+    def test_tier_empirical_handles_unknown_tier_teams(self):
+        eng = load_config(CONFIGS / "incumbent_v0.json")
+        eng = dict(eng, model=dict(eng["model"],
+                                   priors_scheme="tier-empirical-2pass"))
+        u = {"universe": {"1", "2"}, "fit_matches": [("1", "2", 1.0)],
+             "fit_match_ids": [10], "team_tiers": {}}
+        ratings = fit_engine(eng, u)     # no tier info: falls back to base
         self.assertGreater(ratings["1"], ratings["2"])
 
     def test_unknown_scheme_fails_loud(self):

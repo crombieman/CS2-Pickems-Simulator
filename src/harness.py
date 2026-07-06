@@ -194,6 +194,7 @@ def build_fit_universe(event_rows, window_rows, hops=1):
         universe |= nxt
         frontier = nxt
     fit_matches, fit_ids, counts = [], [], {}
+    team_tiers = {}
     for r in sorted(window_rows, key=lambda x: x["match_id"]):
         a, b = str(r["team1_id"]), str(r["team2_id"])
         if a not in universe or b not in universe:
@@ -206,9 +207,14 @@ def build_fit_universe(event_rows, window_rows, hops=1):
         fit_ids.append(r["match_id"])
         counts[a] = counts.get(a, 0) + 1
         counts[b] = counts.get(b, 0) + 1
+        if r["tier"] is not None:
+            # per-team tier exposure (W7/F1 hierarchical priors), window-only
+            for t in (a, b):
+                team_tiers.setdefault(t, {})
+                team_tiers[t][r["tier"]] = team_tiers[t].get(r["tier"], 0) + 1
     return {"universe": universe, "participants": participants,
             "fit_matches": fit_matches, "fit_match_ids": fit_ids,
-            "window_counts": counts}
+            "window_counts": counts, "team_tiers": team_tiers}
 
 
 def assert_no_leakage(fit_rows, graded_rows, boundary):
@@ -229,29 +235,67 @@ def assert_no_leakage(fit_rows, graded_rows, boundary):
 
 
 # -- engine fit + cache (spec 4.4/4.5) --------------------------------------------------
+# Modal-tier tie-break preference (higher tier wins a tie); unknown labels
+# fall back to a deterministic lexicographic pick.
+TIER_PREF = ("s", "a", "b", "c", "d")
+
+
+def _modal_tier(counts):
+    if not counts:
+        return None
+    best = max(counts.values())
+    for t in TIER_PREF:
+        if counts.get(t) == best:
+            return t
+    return sorted(k for k, v in counts.items() if v == best)[0]
+
+
 def fit_engine(engine_cfg, universe_info):
-    """One engine fit under a declared config. v0 supports exactly
-    flat-prior + uniform-weight Bradley-Terry; any other declared scheme
-    fails loud rather than silently approximating (candidate knobs add
-    schemes here, THROUGH the gate). Sigma is passed explicitly for both
-    buckets so the id-universe semantics are declared, not incidental
-    (model.py's sigma bucketing references STAGE3_TEAMS)."""
+    """One engine fit under a declared config. Supported priors schemes:
+    'flat1000' (the v0 incumbent) and 'tier-empirical-2pass' (W7/F1
+    candidate, default-off: pass-1 flat fit -> per-tier means of the fitted
+    ratings, tier per team = modal window-tier exposure -> pass-2 refit
+    with tier-mean priors; window-only, deterministic, no hand-set
+    offsets). Any other declared scheme fails loud rather than silently
+    approximating (candidate knobs add schemes here, THROUGH the gate).
+    Sigma is passed explicitly for both buckets so the id-universe
+    semantics are declared, not incidental (model.py's sigma bucketing
+    references STAGE3_TEAMS)."""
     model_cfg = engine_cfg["model"]
-    if model_cfg["priors_scheme"] != "flat1000":
-        raise HarnessError(f"unknown priors_scheme "
-                           f"{model_cfg['priors_scheme']!r} (v0: flat1000)")
+    scheme = model_cfg["priors_scheme"]
     if engine_cfg["data_prep"]["weighting"] != "uniform":
         raise HarnessError(f"unknown weighting "
                            f"{engine_cfg['data_prep']['weighting']!r} "
                            f"(v0: uniform)")
     universe = sorted(universe_info["universe"])
-    priors = {t: float(model_cfg["prior_mean"]) for t in universe}
+    base = float(model_cfg["prior_mean"])
     sigma = float(model_cfg["sigma"])
-    return fit_bradley_terry(universe_info["fit_matches"], priors=priors,
-                             sigma_s3=sigma, sigma_other=sigma,
-                             iters=model_cfg["iters"], lr=model_cfg["lr"],
-                             recenter_on=universe,
-                             converge_tol=model_cfg.get("converge_tol"))
+
+    def fit(priors):
+        return fit_bradley_terry(universe_info["fit_matches"],
+                                 priors=priors,
+                                 sigma_s3=sigma, sigma_other=sigma,
+                                 iters=model_cfg["iters"],
+                                 lr=model_cfg["lr"],
+                                 recenter_on=universe,
+                                 converge_tol=model_cfg.get("converge_tol"))
+
+    if scheme == "flat1000":
+        return fit({t: base for t in universe})
+    if scheme == "tier-empirical-2pass":
+        flat = fit({t: base for t in universe})
+        team_tiers = universe_info["team_tiers"]
+        by_tier = {}
+        for t in universe:
+            mt = _modal_tier(team_tiers.get(t, {}))
+            if mt is not None:
+                by_tier.setdefault(mt, []).append(flat[t])
+        tier_means = {k: sum(v) / len(v) for k, v in by_tier.items()}
+        priors = {t: tier_means.get(_modal_tier(team_tiers.get(t, {})), base)
+                  for t in universe}
+        return fit(priors)
+    raise HarnessError(f"unknown priors_scheme {scheme!r} "
+                       f"(supported: flat1000, tier-empirical-2pass)")
 
 
 def fit_cache_key(engine_config_sha, universe, fit_match_ids, window_spec,

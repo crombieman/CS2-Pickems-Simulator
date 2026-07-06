@@ -1,0 +1,15 @@
+{
+  "family_id": "f1-tier-priors-v1",
+  "knob_id": "f1.tier-priors",
+  "registered": "2026-07-05",
+  "grid": [
+    "tier-empirical-2pass"
+  ],
+  "incumbent_reference": {
+    "config": "incumbent_v0.json",
+    "priors_scheme": "flat1000"
+  },
+  "motivation": "Master spec W7/F1: MANDATORY safety before tier-2/3 data enters the fit - flat BT pollutes top-tier ratings via the connector graph. Scheme: pass-1 flat fit -> per-tier means (modal window-tier per team) -> pass-2 refit with tier-mean priors. Window-only, deterministic, no hand-set offsets.",
+  "disclosure": "No prior peeks: this scheme has never been run on real data before this registration.",
+  "protocol": "Dev screening via run_replay; select_nominee; holdout confirmation only on an explicit go from Will."
+}
