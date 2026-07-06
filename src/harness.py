@@ -27,6 +27,8 @@ import math
 import random
 import sqlite3
 from calendar import monthrange
+from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 
 from calibration import _brier, _logloss
@@ -69,6 +71,22 @@ def load_config(path):
 
 
 # -- date arithmetic --------------------------------------------------------------
+@lru_cache(maxsize=None)
+def utc_key(iso):
+    """Offset-proof temporal sort key: ISO-8601 (any offset; naive treated
+    as UTC) -> normalized UTC 'YYYY-MM-DDTHH:MM:SS[.ffffff]'. EVERY temporal
+    comparison in the harness goes through this - raw ISO strings order
+    wrongly across offsets (Codex W6a review P1: '...T00:30:00+02:00' sorts
+    after '...T23:00:00+00:00' lexicographically but is chronologically
+    earlier). The archive is uniformly +00:00 today (verified 2026-07-05);
+    this defends the contract against upstream serialization drift.
+    Output compares correctly against date-only strings ('2025-07-01')."""
+    dt = datetime.fromisoformat(iso)
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt.isoformat()
+
+
 def months_before(day, months):
     """'YYYY-MM-DD' (or a full ISO timestamp) minus N calendar months, day
     clamped to the target month's length. Returns a date string that compares
@@ -92,8 +110,13 @@ def event_universe(rows, tiers=("s", "a"), min_matches=8):
     last_start = MAX(start_date) for the dual-end split rule. Exclusions are
     named + counted, never silent."""
     by_tid = {}
-    null_tier = 0
+    null_tier = null_tid = 0
     for r in rows:
+        if r["tournament_id"] is None:
+            # never mint a synthetic None-event from orphan rows (Codex
+            # W6a review P2); counted, not silent
+            null_tid += 1
+            continue
         by_tid.setdefault(r["tournament_id"], []).append(r)
         if r["tier"] is None:
             null_tier += 1
@@ -109,11 +132,14 @@ def event_universe(rows, tiers=("s", "a"), min_matches=8):
             excl_small.append(tid)
             continue
         starts = [r["start_date"] for r in ev_rows]
+        # min/max in UTC time, not string order; the RAW value is kept for
+        # provenance (comparisons downstream re-normalize via utc_key)
         events.append({"tournament_id": tid, "tier": tier,
                        "n_matches": len(ev_rows),
-                       "boundary": min(starts), "last_start": max(starts)})
-    report = {"null_tier_rows": null_tier, "excluded_tier": excl_tier,
-              "excluded_small": excl_small}
+                       "boundary": min(starts, key=utc_key),
+                       "last_start": max(starts, key=utc_key)})
+    report = {"null_tier_rows": null_tier, "null_tournament_rows": null_tid,
+              "excluded_tier": excl_tier, "excluded_small": excl_small}
     return events, report
 
 
@@ -125,9 +151,9 @@ def classify_split(events, split_day):
     inform dev-side selection."""
     out = {"dev": [], "holdout": [], "straddlers": []}
     for ev in events:
-        if ev["last_start"] < split_day:
+        if utc_key(ev["last_start"]) < split_day:
             out["dev"].append(ev)
-        elif ev["boundary"] >= split_day:
+        elif utc_key(ev["boundary"]) >= split_day:
             out["holdout"].append(ev)
         else:
             out["straddlers"].append(ev)
@@ -176,14 +202,16 @@ def build_fit_universe(event_rows, window_rows, hops=1):
 
 def assert_no_leakage(fit_rows, graded_rows, boundary):
     """Spec 3.2.4, asserted per event: nothing the fit sees may start
-    at-or-after the event boundary; nothing graded may start before it."""
+    at-or-after the event boundary; nothing graded may start before it.
+    All comparisons in UTC (utc_key) - offset drift must not hide a leak."""
+    b = utc_key(boundary)
     for r in fit_rows:
-        if r["start_date"] >= boundary:
+        if utc_key(r["start_date"]) >= b:
             raise HarnessError(
                 f"temporal leakage: fit match {r['match_id']} starts "
                 f"{r['start_date']} at-or-after boundary {boundary}")
     for r in graded_rows:
-        if r["start_date"] < boundary:
+        if utc_key(r["start_date"]) < b:
             raise HarnessError(
                 f"graded match {r['match_id']} starts {r['start_date']} "
                 f"before boundary {boundary}")
@@ -221,12 +249,15 @@ def fit_cache_key(engine_config_sha, universe, fit_match_ids, window_spec,
     covers everything that changes a fit - engine config, fit-code version,
     the RESOLVED universe + match set (any upstream rule change alters these
     and misses the cache - stale reuse is structurally impossible), the
-    window spec, and the substrate identity."""
+    window spec, and the substrate identity. `fit_match_ids` is hashed IN
+    FIT ORDER (Codex W6a review P2): gradients accumulate floats in that
+    order, so a reordering is a different fit and must miss the cache. The
+    universe is a resolved SET and is canonicalized."""
     return canonical_sha({
         "fit_code_version": FIT_CODE_VERSION,
         "engine_config_sha": engine_config_sha,
         "universe": sorted(universe),
-        "fit_match_ids": sorted(fit_match_ids),
+        "fit_match_ids": list(fit_match_ids),
         "window": list(window_spec),
         "substrate_id": substrate_id,
     })
@@ -531,10 +562,24 @@ def walk_forward_replay(db_path, harness_cfg, cand_cfg, inc_cfg, *,
                         split="dev", limit=None, cache_dir=CACHE_DIR,
                         universe_hops=None):
     """Replay candidate vs incumbent over the eligible events of one split.
-    Returns in-memory results; run dirs, manifests, pre-replay gates and
-    verdict persistence are W6b's layer on top. `limit` exists for the
-    measured perf budget (spec 4.5) and the 1-vs-2-hop spot-check (4.4) -
-    a limited run is exploratory only, never verdict-bearing."""
+    Returns in-memory results; run dirs, manifests, the REMAINING pre-replay
+    gates and verdict persistence are W6b's layer on top. `limit` exists for
+    the measured perf budget (spec 4.5) and the 1-vs-2-hop spot-check (4.4) -
+    a limited run is exploratory only, never verdict-bearing.
+
+    The 3.2.5 self-test gate is wired HERE, not deferred to W6b (Codex W6a
+    review P1): a harness that misgrades synthetic known answers must refuse
+    to grade anything real, even on exploratory runs."""
+    v = harness_cfg["verdict"]
+    self_test = run_self_test(harness_cfg["seeds"]["self_test"],
+                              mde=v["mde_brier"],
+                              min_events=v["min_events"],
+                              ci_level=v["ci_level"])
+    if not self_test["ok"]:
+        raise HarnessError(
+            f"self-test failed (spec 3.2.5): got {self_test['verdicts']}, "
+            f"expected {self_test['expected']} - no real event may be "
+            f"graded this run")
     con = sqlite3.connect(db_path)
     try:
         rows = consumer_rows(con)
@@ -555,7 +600,8 @@ def walk_forward_replay(db_path, harness_cfg, cand_cfg, inc_cfg, *,
     rows_by_tid = {}
     for r in rows:
         rows_by_tid.setdefault(r["tournament_id"], []).append(r)
-    rows_sorted = sorted(rows, key=lambda r: (r["start_date"], r["match_id"]))
+    rows_sorted = sorted(rows, key=lambda r: (utc_key(r["start_date"]),
+                                              r["match_id"]))
     substrate_sha = canonical_sha(substrate)
     cand_sha, inc_sha = config_sha(cand_cfg), config_sha(inc_cfg)
 
@@ -563,9 +609,10 @@ def walk_forward_replay(db_path, harness_cfg, cand_cfg, inc_cfg, *,
     for ev in chosen:
         ev_rows = rows_by_tid[ev["tournament_id"]]
         boundary = ev["boundary"]
-        w_start = months_before(boundary, harness_cfg["window_months"])
+        b_key = utc_key(boundary)
+        w_start = months_before(b_key, harness_cfg["window_months"])
         win_rows = [r for r in rows_sorted
-                    if w_start <= r["start_date"] < boundary]
+                    if w_start <= utc_key(r["start_date"]) < b_key]
         assert_no_leakage(win_rows, ev_rows, boundary)
         u = build_fit_universe(ev_rows, win_rows, hops=hops)
         window_spec = (w_start, boundary)
@@ -596,6 +643,7 @@ def walk_forward_replay(db_path, harness_cfg, cand_cfg, inc_cfg, *,
              if len(deltas) >= 2 else None)
     return {"harness_version": HARNESS_VERSION, "split": split,
             "limited": limit is not None,
+            "self_test_ok": True, "self_test_seed": self_test["seed"],
             "universe_report": universe_report,
             "n_events_chosen": len(chosen),
             "n_straddlers": len(split_map["straddlers"]),

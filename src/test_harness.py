@@ -10,6 +10,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from bo3gg_parse import build_db
 from test_bo3gg_parse import FixtureArchive, match
@@ -24,7 +25,8 @@ from harness import (FIT_CODE_VERSION, HARNESS_VERSION, HarnessError,
                      canonical_sha, classify_split, config_sha, event_summary,
                      event_universe, fit_cache_key, fit_engine,
                      grade_event_walkforward, load_config, months_before,
-                     paired_event_stats, run_self_test, t_quantile, verdict)
+                     paired_event_stats, run_self_test, t_quantile, utc_key,
+                     verdict, walk_forward_replay)
 
 DATA = Path(__file__).resolve().parent.parent / "data"
 CONFIGS = DATA / "harness" / "configs"
@@ -124,6 +126,19 @@ class TestRecenterOn(unittest.TestCase):
         new = fit_bradley_terry(matches, iters=25, recenter_on=STAGE3_TEAMS)
         self.assertEqual(old, new)
 
+    def test_default_path_matches_pre_w6_goldens(self):
+        # Codex W6a review P3: comparing two NEW paths cannot catch both
+        # drifting together. These values were generated at commit 6dd7466
+        # (proven byte-identical to pre-W6 behavior by fit.py + CI gate) -
+        # they ARE the old behavior, pinned.
+        r = fit_bradley_terry([("Vitality", "Spirit", 1.0),
+                               ("NAVI", "FURIA", 0.5)], iters=25)
+        goldens = {"Vitality": 1189.288373985839, "Spirit": 1065.711626014161,
+                   "NAVI": 1070.4391508097926, "FURIA": 989.5608491902075,
+                   "G2": 920.0}
+        for team, want in goldens.items():
+            self.assertAlmostEqual(r[team], want, places=6)
+
 
 class TestConvergence(unittest.TestCase):
     """W6a ship-gate finding (2026-07-05): lr=2000 is Cologne-tuned (~8
@@ -167,6 +182,60 @@ class TestConvergence(unittest.TestCase):
                                 lr=100.0, recenter_on=["A", "B"])
         new = self.fit(iters=50, converge_tol=None)
         self.assertEqual(old, new)
+
+
+# -- UTC-normalized temporal keys (Codex W6a review P1: offset-proof ordering) ---
+class TestUtcKey(unittest.TestCase):
+    """Raw ISO strings order wrongly across offsets. All harness temporal
+    comparisons must go through utc_key. Current archive is uniformly
+    +00:00 (verified 2026-07-05) - this defends the contract, not a live bug."""
+
+    def test_offset_normalization_reverses_lexicographic_order(self):
+        # Codex's exact scenario: +02:00 row is chronologically EARLIER
+        a = "2024-06-01T00:30:00+02:00"    # = 2024-05-31T22:30 UTC
+        b = "2024-05-31T23:00:00+00:00"    # = 2024-05-31T23:00 UTC
+        self.assertGreater(a, b)                       # raw strings lie
+        self.assertLess(utc_key(a), utc_key(b))        # utc_key does not
+
+    def test_archive_format_normalizes_cleanly(self):
+        self.assertEqual(utc_key("2024-06-01T10:00:00.000+00:00"),
+                         "2024-06-01T10:00:00")
+
+    def test_naive_timestamp_treated_as_utc(self):
+        self.assertEqual(utc_key("2024-06-01T10:00:00"),
+                         "2024-06-01T10:00:00")
+
+    def test_comparable_against_date_only_strings(self):
+        self.assertGreater(utc_key("2024-06-01T10:00:00.000+00:00"),
+                           "2024-06-01")
+        self.assertLess(utc_key("2024-05-31T23:59:59.000+00:00"),
+                        "2024-06-01")
+
+    def test_event_boundary_uses_utc_order(self):
+        rows = event_rows(1, 7, start="2024-06-02T10:00:00+00:00")
+        # lexicographically LATEST (T14:00) but chronologically EARLIEST
+        # (= 2024-06-02T09:00 UTC) row:
+        rows.append(row(99, tid=1, start="2024-06-02T14:00:00+05:00"))
+        events, _ = event_universe(rows, min_matches=8)
+        (ev,) = events
+        self.assertEqual(ev["boundary"], "2024-06-02T14:00:00+05:00")
+        self.assertEqual(ev["last_start"], "2024-06-02T10:00:00+00:00")
+
+    def test_leakage_assertion_is_offset_proof(self):
+        # boundary = 22:30 UTC; fit row 23:00 UTC is AFTER it even though
+        # the raw string compares before - must trip.
+        boundary = "2024-06-01T00:30:00+02:00"
+        fit = [row(1, start="2024-05-31T23:00:00+00:00")]
+        with self.assertRaises(HarnessError):
+            assert_no_leakage(fit, [], boundary)
+
+    def test_split_classification_is_offset_proof(self):
+        # last_start 2025-07-01T01:00+03:00 = 2025-06-30T22:00 UTC -> dev
+        ev = {"tournament_id": 1,
+              "boundary": "2025-06-20T10:00:00+00:00",
+              "last_start": "2025-07-01T01:00:00+03:00"}
+        split = classify_split([ev], "2025-07-01")
+        self.assertEqual([e["tournament_id"] for e in split["dev"]], [1])
 
 
 # -- date arithmetic ------------------------------------------------------------
@@ -223,6 +292,15 @@ class TestEventUniverse(unittest.TestCase):
         events, report = event_universe(rows, min_matches=8)
         self.assertEqual(events, [])
         self.assertEqual(report["excluded_tier"], [1])
+
+    def test_null_tournament_id_rows_excluded_loudly(self):
+        # Codex W6a review P2: a NULL tid must never mint a synthetic event
+        # (0 such rows in the current DB - contract guard).
+        rows = event_rows(1, 8, tier="s")
+        rows.append(row(99, tid=None))
+        events, report = event_universe(rows, min_matches=8)
+        self.assertEqual([e["tournament_id"] for e in events], [1])
+        self.assertEqual(report["null_tournament_rows"], 1)
 
 
 # -- dev/holdout split (spec 4.1 dual-end rule) ----------------------------------
@@ -357,10 +435,14 @@ class TestFitCache(unittest.TestCase):
                              kw["fit_match_ids"], kw["window"],
                              kw["substrate_id"])
 
-    def test_same_inputs_same_key_order_insensitive(self):
+    def test_universe_order_insensitive_ids_order_sensitive(self):
+        # universe is a resolved SET (canonicalized); fit_match_ids are the
+        # FIT-ORDER sequence - float gradients accumulate in that order, so
+        # a reordering is a different fit and must miss the cache (Codex
+        # W6a review P2).
         a = self.key()
-        b = self.key(universe={"3", "2", "1"}, fit_match_ids=[3, 1, 2])
-        self.assertEqual(a, b)
+        self.assertEqual(a, self.key(universe={"3", "2", "1"}))
+        self.assertNotEqual(a, self.key(fit_match_ids=[3, 1, 2]))
 
     def test_every_resolved_input_changes_the_key(self):
         base = self.key()
@@ -494,6 +576,74 @@ class TestSelfTest(unittest.TestCase):
         r = run_self_test(seed=20260705, weights=(0.0, 0.0))
         self.assertFalse(r["ok"])
         self.assertEqual(r["verdicts"]["better"], "INCONCLUSIVE")
+
+
+# -- walk-forward replay end-to-end + self-test gate (Codex W6a review P1) -------------
+class TestWalkForwardReplay(DbCase):
+    """Fixture-DB integration: the replay path itself, and the 3.2.5 gate -
+    a failed self-test must block the replay BEFORE it touches real events."""
+
+    CFG = {"harness_version": HARNESS_VERSION,
+           "eligibility": {"tiers": ["s"], "min_consumer_matches": 8},
+           "window_months": 24,
+           "fit_universe": {"rule": "2hop", "min_obs": 3},
+           "coverage_floor": 0.5,
+           "holdout_split": "2027-01-01",          # everything is dev
+           "seeds": {"self_test": 20260705},
+           "verdict": {"mde_brier": 0.002, "ci_level": 0.95,
+                       "min_events": 10}}
+
+    @staticmethod
+    def m(mid, tid, winner, start):
+        # scores must be winner-consistent or the parser quarantines the row
+        s1, s2 = (2, 1) if winner == "t1" else (1, 2)
+        return match(mid, tournament_id=tid, s1=s1, s2=s2, winner=winner,
+                     start=start)
+
+    def replay_db(self):
+        rows = []
+        # window-only tournament (6 matches: below the eligibility floor,
+        # still feeds the fit windows of the real events)
+        for i in range(6):
+            rows.append(self.m(1 + i, 400, "t1" if i % 3 else "t2",
+                               f"2026-01-{10 + i:02d}T10:00:00+00:00"))
+        # two eligible events, 8 matches each, teams 1 vs 2
+        for i in range(8):
+            rows.append(self.m(100 + i, 501, "t2" if i % 2 else "t1",
+                               f"2026-06-01T{10 + i}:00:00+00:00"))
+            rows.append(self.m(200 + i, 502, "t1" if i % 2 else "t2",
+                               f"2026-07-01T{10 + i}:00:00+00:00"))
+        db, con = self.build(rows)
+        classify_promotions(con)
+        con.commit()
+        return db
+
+    def test_end_to_end_fixture_replay(self):
+        db = self.replay_db()
+        inc = load_config(CONFIGS / "incumbent_v0.json")
+        with tempfile.TemporaryDirectory() as tmp:
+            out = walk_forward_replay(db, self.CFG, inc, inc,
+                                      cache_dir=Path(tmp))
+        self.assertTrue(out["self_test_ok"])
+        self.assertEqual([s["tournament_id"] for s in out["events"]],
+                         [501, 502])
+        self.assertEqual(out["excluded_events"], [])
+        self.assertEqual(len(out["rows"]), 16)
+        self.assertEqual(out["stats"]["n_events"], 2)
+        self.assertEqual(out["stats"]["mean"], 0.0)   # inc-vs-inc exactly
+        self.assertEqual(out["stats"]["se"], 0.0)
+
+    def test_failed_self_test_blocks_replay(self):
+        db = self.replay_db()
+        inc = load_config(CONFIGS / "incumbent_v0.json")
+        broken = {"ok": False, "verdicts": {"better": "INCONCLUSIVE"},
+                  "expected": {"better": "DEV-SCREENED"}, "stats": {},
+                  "seed": 20260705}
+        with mock.patch("harness.run_self_test", return_value=broken):
+            with tempfile.TemporaryDirectory() as tmp:
+                with self.assertRaises(HarnessError):
+                    walk_forward_replay(db, self.CFG, inc, inc,
+                                        cache_dir=Path(tmp))
 
 
 # -- configs (spec 3.1: committed, declared before replay) ----------------------------
