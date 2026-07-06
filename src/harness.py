@@ -33,7 +33,10 @@ from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 
-from calibration import GRADE_VERSION, _brier, _git_sha, _logloss, _src_dirty
+from calibration import (GRADE_VERSION, _brier, _git_sha, _logloss, _sha,
+                         _src_dirty)
+from event_config import EVENTS as EVENTS_DIR
+from event_config import load_event
 from integrity_audit import consumer_rows
 from model import fit_bradley_terry, win_prob
 from playoffs import paired_margin
@@ -709,9 +712,11 @@ def _load_substrate(db_path):
         rows = consumer_rows(con)
         substrate = substrate_identity(db_path, con)
         meta = dict(con.execute("SELECT key, value FROM parse_meta"))
+        aliases = dict(con.execute(
+            "SELECT canonical, team_id FROM canonical_alias"))
     finally:
         con.close()
-    return rows, substrate, meta
+    return rows, substrate, meta, aliases
 
 
 def _run_self_test_gate(harness_cfg):
@@ -737,7 +742,7 @@ def _enumerate(rows, harness_cfg, split, limit):
     chosen = split_map[split]
     if limit is not None:
         chosen = chosen[:limit]
-    return chosen, split_map, universe_report
+    return chosen, split_map, universe_report, events
 
 
 def _prep_events(rows, chosen, harness_cfg, universe_hops=None):
@@ -824,9 +829,9 @@ def walk_forward_replay(db_path, harness_cfg, cand_cfg, inc_cfg, *,
     harness that misgrades synthetic known answers must refuse to grade
     anything real, even on exploratory runs."""
     self_test = _run_self_test_gate(harness_cfg)
-    rows, substrate, _meta = _load_substrate(db_path)
-    chosen, split_map, universe_report = _enumerate(rows, harness_cfg,
-                                                    split, limit)
+    rows, substrate, _meta, _aliases = _load_substrate(db_path)
+    chosen, split_map, universe_report, _events = _enumerate(
+        rows, harness_cfg, split, limit)
     prepped = _prep_events(rows, chosen, harness_cfg,
                            universe_hops=universe_hops)
     summaries, all_rows, _keys = _replay_prepped(
@@ -845,6 +850,130 @@ def walk_forward_replay(db_path, harness_cfg, cand_cfg, inc_cfg, *,
                                 if s["excluded"]],
             "events": summaries, "rows": all_rows, "stats": stats,
             "substrate": substrate}
+
+
+# -- slate objective arm (spec 6.2 / DoR 5(8), W6c) -------------------------------------------
+def slate_objective_check(cand_ratings, inc_ratings, eval_ratings, *,
+                          n_sims, seed, ci_level=0.95, event_cfg=None,
+                          k30=5, k03=5, kadv=9):
+    """The proxy->objective check: does the candidate's belief change the
+    SLATE, and does the changed slate hold up? Candidate and incumbent
+    ratings each run sim -> optimizer; both chosen slates are then scored
+    per-draw on ONE shared draw set from `eval_ratings` (the
+    playoffs.paired_margin pattern at slate level). objective_ok iff the
+    paired P(>=threshold) delta is non-negative or not significantly
+    negative at ci_level.
+
+    Eval-measure choice (v0, recorded in every verdict): real runs pass the
+    INCUMBENT ratings - a conservative directional block against
+    slate-harming knobs under the currently-trusted belief system; synthetic
+    tests pass the generating TRUTH, which is what gives the known-answer
+    cases their known answers. No realized outcomes are consumed, so the
+    arm is split-safe. With n=1 slate event this blocks harm, it cannot
+    prove slate improvement (honest limitation, spec 6.2).
+
+    Market policy is 'none': PAIR_OVERRIDES is emptied for the duration
+    (in-place, so every `from simulate import` binding sees it) and
+    restored afterward. v0 supports only the currently-bound event config
+    (Cologne) - the sim hardcodes the 16-team Swiss; multi-event rebind
+    lands with the next EventConfig."""
+    import optimize
+    import simulate
+    from event_config import COLOGNE
+    cfg = event_cfg or COLOGNE
+    if cfg.event_id != COLOGNE.event_id:
+        raise HarnessError(
+            f"slate arm v0 supports only the bound event "
+            f"{COLOGNE.event_id!r}, got {cfg.event_id!r} (multi-event "
+            f"rebind lands with the next EventConfig)")
+    saved = dict(simulate.PAIR_OVERRIDES)
+    simulate.PAIR_OVERRIDES.clear()
+    try:
+        sims_c, stats_c = simulate.run(cand_ratings, n_sims=n_sims, seed=seed)
+        sims_i, stats_i = simulate.run(inc_ratings, n_sims=n_sims, seed=seed)
+        best_c = optimize.optimize(sims_c, stats_c, k30=k30, k03=k03,
+                                   kadv=kadv)
+        best_i = optimize.optimize(sims_i, stats_i, k30=k30, k03=k03,
+                                   kadv=kadv)
+        if best_c is None or best_i is None:
+            raise HarnessError(
+                f"slate arm: optimizer found no feasible slate "
+                f"(k30={k30}, k03={k03}, kadv={kadv}: advance pool "
+                f"exhausted after 3-0/0-3 overlap - raise kadv)")
+        p5c, _evc, c30c, c03c, advc = best_c
+        p5i, _evi, c30i, c03i, advi = best_i
+        if eval_ratings is inc_ratings:
+            sims_e = sims_i
+        elif eval_ratings is cand_ratings:
+            sims_e = sims_c
+        else:
+            sims_e, _ = simulate.run(eval_ratings, n_sims=n_sims, seed=seed)
+        thr = optimize.PASS_THRESHOLD
+        hits_c = [1.0 if optimize.slate_correct(r, c30c, c03c, advc) >= thr
+                  else 0.0 for r in sims_e]
+        hits_i = [1.0 if optimize.slate_correct(r, c30i, c03i, advi) >= thr
+                  else 0.0 for r in sims_e]
+    finally:
+        simulate.PAIR_OVERRIDES.update(saved)
+    mean, se = paired_margin(hits_c, hits_i)
+    t_crit = t_quantile(0.5 + ci_level / 2.0, len(sims_e) - 1)
+    identical = (set(c30c) == set(c30i) and set(c03c) == set(c03i)
+                 and set(advc) == set(advi))
+    return {"objective_ok": mean >= 0 or (mean + t_crit * se) >= 0,
+            "mean": mean, "se": se,
+            "ci": [mean - t_crit * se, mean + t_crit * se],
+            "identical_slates": identical,
+            "slate_cand": {"exact_3_0": sorted(c30c),
+                           "exact_0_3": sorted(c03c),
+                           "advance": sorted(advc), "p5_self": p5c},
+            "slate_inc": {"exact_3_0": sorted(c30i),
+                          "exact_0_3": sorted(c03i),
+                          "advance": sorted(advi), "p5_self": p5i},
+            "n_sims": n_sims, "seed": seed,
+            "note": "n=1 slate event: directional block against "
+                    "slate-harming knobs, not proof of slate improvement"}
+
+
+def _guard_screening_needs_objective(verdict_name, objective_computed):
+    """DoR 5(8): a screening-grade verdict without the objective arm is a
+    hole in the gate, never a pass."""
+    if verdict_name in ("DEV-SCREENED", "ADOPTED") and not objective_computed:
+        raise HarnessError(
+            f"{verdict_name} requires the slate objective check (DoR 5(8)) "
+            f"but no slate-bearing event was computable this run")
+
+
+def cologne_cross_check():
+    """Real-data known-answer (spec 6.2): grade the locked Cologne snapshot
+    through the harness's scoring path and require EXACT agreement with
+    calibration.py's committed graded log (the already-verified grader).
+    Read-only over committed artifacts; locked v3 ratings path."""
+    from calibration import COLOGNE_SNAPSHOT, load_latest
+    from model import load_pair_overrides
+    snap = COLOGNE_SNAPSHOT
+    matches = json.load(open(DATA / snap["matches_file"]))["matches"]
+    ratings = json.load(open(DATA / snap["ratings_file"]))
+    overrides = load_pair_overrides(DATA / snap["anchors_file"])
+    committed = {(r["a"], r["b"]): r for r in load_latest()
+                 if r["kind"] == "match" and r.get("event") == snap["event"]}
+    mismatches = []
+    for m in matches:
+        a, b = m["a"], m["b"]
+        y = 1.0 if m["winner"] == a else 0.0
+        p = overrides.get((a, b))
+        p = p if p is not None else win_prob(ratings, a, b)
+        row = committed.get((a, b))
+        if row is None:
+            mismatches.append(f"{a} vs {b}: missing from graded log")
+            continue
+        for field, want in (("model_prob", p), ("result", y),
+                            ("brier_model", _brier(p, y)),
+                            ("log_model", _logloss(p, y))):
+            if row[field] != want:
+                mismatches.append(
+                    f"{a} vs {b}: {field} {row[field]!r} != {want!r}")
+    return {"n": len(matches), "n_committed": len(committed),
+            "mismatches": mismatches, "ok": not mismatches}
 
 
 # -- evidence table (spec 3.1/5.2: baselines are evidence, never gates) ----------------------
@@ -880,6 +1009,89 @@ def evidence_table(graded_rows, baseline_cfgs):
         out["baselines"][cfg["name"]] = {"brier": mean(briers),
                                          "log": mean(logs)}
     return out
+
+
+# -- slate-arm wiring for gated runs (spec 6.2, W6c) -------------------------------------------
+def _slate_event_configs():
+    """Slate-bearing events = event configs that pin a substrate
+    tournament_id (v0: Cologne). Discovered from data/events/*.json."""
+    out = {}
+    for p in sorted(EVENTS_DIR.glob("*.json")):
+        cfg = load_event(p)
+        if cfg.tournament_id is not None:
+            out[cfg.tournament_id] = (cfg, p)
+    return out
+
+
+def _slate_arm(rows, all_events, aliases, harness_cfg, cand_cfg, inc_cfg,
+               cache_dir, substrate_sha, ci_level):
+    """Run the spec-6.2 objective arm on every slate-bearing event present
+    in the substrate: fit both configs on the event's own walk-forward
+    window (cached), map id-keyed ratings to model names via
+    canonical_alias, replay the slate. Returns (objective_check,
+    objective_replay_inputs, objective_ok); objective_ok is None when no
+    slate event was computable - the screening guard then refuses any
+    screening-grade verdict."""
+    events_by_tid = {e["tournament_id"]: e for e in all_events}
+    arm_events, inputs_events, computed_oks = {}, {}, []
+    cand_sha, inc_sha = config_sha(cand_cfg), config_sha(inc_cfg)
+    for tid, (ev_cfg, cfg_path) in _slate_event_configs().items():
+        key = str(tid)
+        ev = events_by_tid.get(tid)
+        if ev is None:
+            arm_events[key] = {"status": "not-in-substrate",
+                               "event_id": ev_cfg.event_id}
+            continue
+        prep = _prep_events(rows, [ev], harness_cfg)[0]
+        u = prep["universe"]
+        fits, fit_keys = {}, {}
+        for tag, cfg, sha in (("cand", cand_cfg, cand_sha),
+                              ("inc", inc_cfg, inc_sha)):
+            k = fit_cache_key(sha, u["universe"], u["fit_match_ids"],
+                              prep["window_spec"], substrate_sha)
+            ratings = cached_fit(cache_dir, k,
+                                 lambda c=cfg, ui=u: fit_engine(c, ui))
+            fits[tag] = ratings
+            fit_keys[tag] = {"key": k, "ratings_sha": canonical_sha(ratings)}
+        missing = [t for t in ev_cfg.teams
+                   if t not in aliases or str(aliases[t]) not in fits["cand"]]
+        if missing:
+            raise HarnessError(
+                f"slate arm: event {ev_cfg.event_id} teams missing from the "
+                f"alias map or fit universe: {missing} - the arm must never "
+                f"run on a partial slate")
+        by_name = {tag: {t: fits[tag][str(aliases[t])]
+                         for t in ev_cfg.teams} for tag in ("cand", "inc")}
+        res = slate_objective_check(
+            by_name["cand"], by_name["inc"], by_name["inc"],
+            n_sims=harness_cfg["mc"]["slate_sims"],
+            seed=harness_cfg["seeds"]["slate_sim"],
+            ci_level=ci_level, event_cfg=ev_cfg)
+        res["status"] = "computed"
+        res["eval_measure"] = "incumbent"
+        res["event_id"] = ev_cfg.event_id
+        arm_events[key] = res
+        computed_oks.append(res["objective_ok"])
+        inputs_events[key] = {
+            "event_config": {"path": Path(cfg_path).name,
+                             "sha": _sha(cfg_path)},
+            "fit_cache": fit_keys,
+            "optimizer_objective": ev_cfg.optimizer_objective}
+    if computed_oks:
+        objective_ok = all(computed_oks)
+        check_status = "ok" if objective_ok else "negative"
+        inputs = {"events": inputs_events,
+                  "seed": harness_cfg["seeds"]["slate_sim"],
+                  "n_sims": harness_cfg["mc"]["slate_sims"],
+                  "eval_measure": "incumbent",
+                  "market_policy": "none (pure-model arm)",
+                  "results_consumed": None}
+    else:
+        objective_ok, check_status, inputs = None, "no-slate-events-computed", None
+    check = {"status": check_status, "events": arm_events,
+             "note": "n=1 slate event: directional block against "
+                     "slate-harming knobs, not proof of slate improvement"}
+    return check, inputs, objective_ok
 
 
 # -- persisted gated runs (spec 3.2/3.3/3.4/5, W6b) ------------------------------------------
@@ -954,14 +1166,14 @@ def run_replay(db_path, candidate_path, *, incumbent_path=None,
         gate_config_diff(cand_cfg, inc_cfg)
     except HarnessError as e:
         blocked_gates.append(str(e))
-    rows, substrate, meta = _load_substrate(db_path)
+    rows, substrate, meta, aliases = _load_substrate(db_path)
     try:
         gate_parse_meta(meta)
     except HarnessError as e:
         blocked_gates.append(str(e))
 
-    chosen, split_map, universe_report = _enumerate(rows, harness_cfg,
-                                                    split, limit)
+    chosen, split_map, universe_report, all_events = _enumerate(
+        rows, harness_cfg, split, limit)
     if len(chosen) < v_cfg["min_events"]:
         blocked_gates.append(
             f"gate min_events: insufficient-n: {len(chosen)} events "
@@ -975,6 +1187,8 @@ def run_replay(db_path, candidate_path, *, incumbent_path=None,
 
     summaries, all_rows, cache_keys, stats = [], [], {}, None
     verdict_obj = None
+    objective_check = {"status": "not-run", "events": {}}
+    objective_inputs = None
     if not blocked_gates:
         prepped = _prep_events(rows, chosen, harness_cfg)
         summaries, all_rows, cache_keys = _replay_prepped(
@@ -989,6 +1203,9 @@ def run_replay(db_path, candidate_path, *, incumbent_path=None,
                                  "tournament_id": s["tournament_id"],
                                  "coverage": s["coverage"]})
         stats, included = _stats_from_summaries(summaries, harness_cfg)
+        objective_check, objective_inputs, objective_ok = _slate_arm(
+            rows, all_events, aliases, harness_cfg, cand_cfg, inc_cfg,
+            cache_dir, substrate_sha, v_cfg["ci_level"])
         if stats is None or stats["n_events"] < v_cfg["min_events"]:
             n = 0 if stats is None else stats["n_events"]
             blocked_gates.append(
@@ -997,7 +1214,12 @@ def run_replay(db_path, candidate_path, *, incumbent_path=None,
         else:
             verdict_obj = verdict(stats, mde=v_cfg["mde_brier"],
                                   min_events=v_cfg["min_events"],
-                                  objective_ok=True, split=split)
+                                  objective_ok=(objective_ok
+                                                if objective_ok is not None
+                                                else True),
+                                  split=split)
+            _guard_screening_needs_objective(verdict_obj["verdict"],
+                                             objective_ok is not None)
 
     code_dirty = _src_dirty()
     manifest = {
@@ -1025,6 +1247,10 @@ def run_replay(db_path, candidate_path, *, incumbent_path=None,
         "nominated_by_run_id": nominated_by,
         "blocked_gates": blocked_gates,
     }
+    if objective_inputs is not None:
+        # present iff the slate arm computed (spec 3.3: absent for runs
+        # without a slate arm - never silently partial)
+        manifest["objective_replay_inputs"] = objective_inputs
     # exploratory-only unless: clean tree, all gates green, UNLIMITED run
     # (review P1: a subset must never be adoption-grade), and no
     # placeholder hash anywhere - INCLUDING inside the configs themselves
@@ -1063,7 +1289,7 @@ def run_replay(db_path, candidate_path, *, incumbent_path=None,
                 f"verdict-bearing (spec 4.5)")
     verdict_out.update({"run_id": run_id, "split": split,
                         "sweep_family": cand_cfg.get("sweep_family"),
-                        "objective_check": "not-wired-w6c",
+                        "objective_check": objective_check,
                         "adoption_eligible": manifest["adoption_eligible"]})
 
     run_dir = run_root / run_id
@@ -1156,9 +1382,17 @@ def main():
                          ("incumbent", v["evidence"]["incumbent"])]
                         + sorted(v["evidence"]["baselines"].items())):
             print(f"  {name:12s} brier {e['brier']:.4f}  log {e['log']:.4f}")
+    oc = v["objective_check"]
     print(f"  sweep_family={v['sweep_family']}  "
-          f"objective_check={v['objective_check']}  "
+          f"objective_check={oc['status']}  "
           f"adoption_eligible={v['adoption_eligible']}")
+    for tid, e in sorted(oc["events"].items()):
+        if e.get("status") == "computed":
+            same = "identical slates" if e["identical_slates"] else \
+                f"paired dP(>=thr) {e['mean']:+.4f} CI [{e['ci'][0]:+.4f}, " \
+                f"{e['ci'][1]:+.4f}]"
+            print(f"  slate arm {e['event_id']}: {same}  "
+                  f"ok={e['objective_ok']}  ({oc['note']})")
     raise SystemExit(1 if v["verdict"] == "BLOCKED" else 0)
 
 

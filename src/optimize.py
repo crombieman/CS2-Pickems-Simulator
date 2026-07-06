@@ -38,6 +38,16 @@ N_30, N_03, N_ADV = _SCORE["exact_3_0"], _SCORE["exact_0_3"], _SCORE["advance"]
 PASS_THRESHOLD = _SCORE["pass_threshold"]
 
 
+def slate_correct(result, picks_30, picks_03, picks_adv):
+    """Correct-pick count for one simulated (or realized) stage result. THE
+    canonical slate scorer: the W6 harness's objective arm imports this so
+    there is exactly one scoring dialect (score_slate's inline loop is
+    pinned equal to it by test)."""
+    return (sum(1 for t in picks_30 if result[t] == (3, 0))
+            + sum(1 for t in picks_03 if result[t] == (0, 3))
+            + sum(1 for t in picks_adv if result[t] in ((3, 1), (3, 2))))
+
+
 def score_slate(sims, picks_30, picks_03, picks_adv):
     """Return (P(>=threshold correct), E[correct]) for a slate over stored sims."""
     hits = total = 0

@@ -6,7 +6,7 @@
   "coverage_floor": 0.5,
   "holdout_split": "2025-07-01",
   "reserve_split": "2026-01-01",
-  "seeds": {"self_test": 20260705},
-  "mc": {"slate_sims": 40000},
+  "seeds": {"self_test": 20260705, "slate_sim": 11},
+  "mc": {"slate_sims": 8000},
   "verdict": {"mde_brier": 0.002, "ci_level": 0.95, "min_events": 10}
 }

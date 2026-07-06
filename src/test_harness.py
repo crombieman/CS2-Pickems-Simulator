@@ -23,13 +23,13 @@ from model import STAGE3_TEAMS, fit_bradley_terry
 import harness
 from harness import (FIT_CODE_VERSION, HARNESS_VERSION, HarnessError,
                      assert_no_leakage, build_fit_universe, cached_fit,
-                     canonical_sha, classify_split, config_sha, diff_paths,
-                     event_summary, event_universe, fit_cache_key, fit_engine,
-                     gate_config_diff, gate_parse_meta,
-                     grade_event_walkforward, load_config, months_before,
-                     paired_event_stats, run_replay, run_self_test,
-                     select_nominee, t_quantile, utc_key, verdict,
-                     walk_forward_replay)
+                     canonical_sha, classify_split, cologne_cross_check,
+                     config_sha, diff_paths, event_summary, event_universe,
+                     fit_cache_key, fit_engine, gate_config_diff,
+                     gate_parse_meta, grade_event_walkforward, load_config,
+                     months_before, paired_event_stats, run_replay,
+                     run_self_test, select_nominee, slate_objective_check,
+                     t_quantile, utc_key, verdict, walk_forward_replay)
 
 DATA = Path(__file__).resolve().parent.parent / "data"
 CONFIGS = DATA / "harness" / "configs"
@@ -838,7 +838,10 @@ class TestRunReplay(ReplayFixture):
         v = json.loads((run_dir / "verdict.json").read_text())
         # sigma 60 vs 50 on 2 events, t(0.975,1)=12.7 -> INCONCLUSIVE
         self.assertEqual(v["verdict"], "INCONCLUSIVE")
-        self.assertEqual(v["objective_check"], "not-wired-w6c")
+        # fixture substrate has no slate-bearing tournament -> recorded, and
+        # screening is impossible without the arm (guard tested separately)
+        self.assertEqual(v["objective_check"]["status"],
+                         "no-slate-events-computed")
         self.assertTrue(v["adoption_eligible"])
         # baseline evidence present, never gating
         self.assertAlmostEqual(
@@ -1083,6 +1086,88 @@ class TestRunReplay(ReplayFixture):
                 self.assertEqual(len(keys[tag]["ratings_sha"]), 64, tid)
 
 
+# -- W6c: slate objective check (spec 6.2) ----------------------------------------------
+class TestSlateObjectiveCheck(unittest.TestCase):
+    """Synthetic known answers: in a synthetic world we HAVE the generating
+    truth, so the arm is validated with truth-measure draws; real runs pass
+    the incumbent measure (the conservative directional block)."""
+
+    N_SIMS = 800
+    # kadv must leave >= 6 advance picks after 3-0/0-3 overlap removal
+    KS = {"k30": 3, "k03": 3, "kadv": 11}
+
+    @classmethod
+    def setUpClass(cls):
+        rng = __import__("random").Random(20260705)
+        cls.truth = {t: rng.uniform(850, 1150) for t in STAGE3_TEAMS}
+        cls.noisy = {t: r + rng.gauss(0, 30) for t, r in cls.truth.items()}
+        # rank inversion: decisively wrong beliefs
+        cls.inverted = {t: 2000 - r for t, r in cls.truth.items()}
+
+    def check(self, cand, inc, eval_r):
+        return slate_objective_check(cand, inc, eval_r,
+                                     n_sims=self.N_SIMS, seed=7,
+                                     ci_level=0.95, **self.KS)
+
+    def test_better_candidate_passes(self):
+        r = self.check(self.truth, self.noisy, self.truth)
+        self.assertTrue(r["objective_ok"])
+        self.assertGreaterEqual(r["mean"], 0.0)
+
+    def test_worse_candidate_fails(self):
+        r = self.check(self.inverted, self.truth, self.truth)
+        self.assertFalse(r["objective_ok"])
+        self.assertLess(r["mean"], 0.0)
+
+    def test_identical_ratings_zero_delta(self):
+        r = self.check(self.truth, self.truth, self.truth)
+        self.assertTrue(r["objective_ok"])
+        self.assertEqual(r["mean"], 0.0)
+        self.assertTrue(r["identical_slates"])
+
+    def test_pair_overrides_neutralized_and_restored(self):
+        import simulate
+        before = dict(simulate.PAIR_OVERRIDES)
+        self.assertTrue(before)          # anchors exist in this repo
+        self.check(self.truth, self.truth, self.truth)
+        self.assertEqual(simulate.PAIR_OVERRIDES, before)
+
+    def test_screening_guard_requires_objective_arm(self):
+        from harness import _guard_screening_needs_objective
+        with self.assertRaises(HarnessError):
+            _guard_screening_needs_objective("DEV-SCREENED", False)
+        _guard_screening_needs_objective("INCONCLUSIVE", False)  # no raise
+        _guard_screening_needs_objective("DEV-SCREENED", True)   # no raise
+
+
+class TestSlateCorrectDialect(unittest.TestCase):
+    def test_slate_correct_agrees_with_score_slate(self):
+        # single-scoring-dialect pin: optimize.score_slate's inline k and
+        # the canonical slate_correct must agree on every sim
+        import optimize
+        rng = __import__("random").Random(3)
+        teams = list(STAGE3_TEAMS)
+        recs = [(3, 0), (3, 1), (3, 2), (0, 3), (1, 3), (2, 3)]
+        sims = [{t: recs[rng.randrange(len(recs))] for t in teams}
+                for _ in range(50)]
+        c30, c03 = teams[:2], teams[2:4]
+        cadv = teams[4:10]
+        p5, ev = optimize.score_slate(sims, c30, c03, cadv)
+        ks = [optimize.slate_correct(r, c30, c03, cadv) for r in sims]
+        self.assertEqual(p5, sum(k >= optimize.PASS_THRESHOLD
+                                 for k in ks) / len(sims))
+        self.assertEqual(ev, sum(ks) / len(sims))
+
+
+# -- W6c: Cologne known-answer cross-check (spec 6.2) --------------------------------------
+class TestCologneCrossCheck(unittest.TestCase):
+    def test_exact_agreement_with_committed_graded_log(self):
+        r = cologne_cross_check()
+        self.assertEqual(r["mismatches"], [])
+        self.assertEqual(r["n"], 33)
+        self.assertTrue(r["ok"])
+
+
 # -- configs (spec 3.1: committed, declared before replay) ----------------------------
 class TestConfigs(unittest.TestCase):
     def test_harness_v0_loads_with_required_fields(self):
@@ -1121,6 +1206,11 @@ class TestConfigs(unittest.TestCase):
         self.assertEqual(cfg["market_policy"], "none")
         self.assertIsNone(cfg["knob_id"])
         self.assertIn("forward_prereg", cfg)     # W12 extends, never forks
+
+    def test_cologne_event_config_pins_substrate_tournament(self):
+        # W6c: the slate arm links EventConfig -> substrate via tournament_id
+        from event_config import COLOGNE
+        self.assertEqual(COLOGNE.tournament_id, 4209)
 
     def test_config_sha_is_canonical(self):
         a = config_sha({"b": 1, "a": [2, 3]})

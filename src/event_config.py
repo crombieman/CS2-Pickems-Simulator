@@ -55,6 +55,10 @@ class EventConfig:
     ruleset_version: str
     optimizer_objective: str
     lock_timestamp: object  # ISO-8601 str or None
+    # bo3.gg tournament_id linking this event to the parsed substrate (W6c:
+    # the slate objective arm discovers slate-bearing events through it).
+    # None = event not linked (no slate arm possible for it).
+    tournament_id: object = None
 
     @classmethod
     def from_dict(cls, d: dict) -> "EventConfig":
@@ -78,6 +82,7 @@ class EventConfig:
             ruleset_version=d.get("ruleset_version", "unknown"),
             optimizer_objective=d.get("optimizer_objective", "p_ge_threshold"),
             lock_timestamp=d.get("lock_timestamp"),
+            tournament_id=d.get("tournament_id"),
         )
 
 
