@@ -21,17 +21,19 @@ reproducible; JSON float round-trips are exact, so a cache hit is
 byte-equivalent to the fit it stored.
 """
 
+import argparse
 import hashlib
 import json
 import math
 import random
+import shutil
 import sqlite3
 from calendar import monthrange
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 
-from calibration import _brier, _logloss
+from calibration import GRADE_VERSION, _brier, _git_sha, _logloss, _src_dirty
 from integrity_audit import consumer_rows
 from model import fit_bradley_terry, win_prob
 from playoffs import paired_margin
@@ -41,6 +43,12 @@ DATA = REPO / "data"
 HARNESS_DIR = DATA / "harness"
 CACHE_DIR = HARNESS_DIR / "cache"          # derived, gitignored
 CONFIGS_DIR = HARNESS_DIR / "configs"      # committed (spec 3.1)
+RUNS_DIR = HARNESS_DIR / "runs"            # derived, gitignored (spec 3.3)
+BURN_LOG = HARNESS_DIR / "holdout_burn_log.jsonl"   # committed (spec 5.3)
+
+# Candidacy bookkeeping fields excluded from the config diff (they differ
+# by construction and are not knob changes; spec 3.1/3.2.7).
+IDENTITY_FIELDS = ("name", "knob_id", "expected_diff_paths", "sweep_family")
 
 HARNESS_VERSION = "v0:event-scoped-walkforward+paired-events"
 # Bump whenever fit-path code semantics change (the PARSE_VERSION idiom).
@@ -462,12 +470,13 @@ def paired_event_stats(event_deltas, ci_level=0.95):
             "ci": [mean - t_crit * se, mean + t_crit * se]}
 
 
-def verdict(stats, *, mde, min_events, objective_ok=True):
-    """Verdict classification (spec 5.2, W6a slice - the full gate stack,
-    baselines and sweep-family nominee selection land in W6b). Negative
-    delta = candidate better (Brier/log-loss). objective_ok=False marks a
-    metric-screened knob proxy-only (DoR 5(8)): kept for research, barred
-    from screening."""
+def verdict(stats, *, mde, min_events, objective_ok=True, split="dev"):
+    """Verdict classification (spec 5.2). Two-stage by design: on the dev
+    split a pass is DEV-SCREENED (screening evidence only); the SAME test
+    passed on the holdout split is ADOPTED - the only path to
+    default-flipping. Negative delta = candidate better (Brier/log-loss).
+    objective_ok=False marks a metric-screened knob proxy-only (DoR 5(8)):
+    kept for research, barred from screening."""
     n, mean = stats["n_events"], stats["mean"]
     lo, hi = stats["ci"]
     if n < min_events:
@@ -479,7 +488,8 @@ def verdict(stats, *, mde, min_events, objective_ok=True):
             return {"verdict": "INCONCLUSIVE",
                     "reason": "metric-screened but objective check negative"
                               " -> proxy-only (DoR 5(8))", "stats": stats}
-        return {"verdict": "DEV-SCREENED",
+        name = "DEV-SCREENED" if split == "dev" else "ADOPTED"
+        return {"verdict": name,
                 "reason": f"CI [{lo:.6f}, {hi:.6f}] entirely < 0 and "
                           f"|mean| {abs(mean):.6f} >= MDE {mde}",
                 "stats": stats}
@@ -491,6 +501,23 @@ def verdict(stats, *, mde, min_events, objective_ok=True):
             "reason": "CI crosses 0 or |mean| < MDE - incumbent stays;"
                       " explicitly NOT evidence of equivalence",
             "stats": stats}
+
+
+def select_nominee(results):
+    """Sweep-family nominee selection (spec 3.1/5.2): among DEV-SCREENED
+    variants of ONE family, the best dev mean is the single nominee allowed
+    to touch the holdout. Per-variant dev significance is screening
+    evidence only - family size cannot inflate adoption false positives
+    because adoption never happens on dev."""
+    families = {r["sweep_family"] for r in results}
+    if len(families) > 1:
+        raise HarnessError(f"select_nominee: results span multiple sweep "
+                           f"families {sorted(map(str, families))} - a "
+                           f"nominee is per-family")
+    screened = [r for r in results if r["verdict"] == "DEV-SCREENED"]
+    if not screened:
+        return None
+    return min(screened, key=lambda r: r["stats"]["mean"])
 
 
 # -- synthetic self-test (spec 6.1 / DoR 6) ----------------------------------------------------
@@ -557,19 +584,84 @@ def run_self_test(seed, n_events=40, n_matches=20, mde=0.002, min_events=10,
             "stats": stats, "seed": seed}
 
 
-# -- walk-forward orchestration (spec 4; consumed by the W6b gate/manifest layer) ----------------
-def walk_forward_replay(db_path, harness_cfg, cand_cfg, inc_cfg, *,
-                        split="dev", limit=None, cache_dir=CACHE_DIR,
-                        universe_hops=None):
-    """Replay candidate vs incumbent over the eligible events of one split.
-    Returns in-memory results; run dirs, manifests, the REMAINING pre-replay
-    gates and verdict persistence are W6b's layer on top. `limit` exists for
-    the measured perf budget (spec 4.5) and the 1-vs-2-hop spot-check (4.4) -
-    a limited run is exploratory only, never verdict-bearing.
+# -- pre-replay gates (spec 3.2, W6b) ------------------------------------------------------
+def gate_parse_meta(meta):
+    """Gates 3.2.1 + 3.2.2: the substrate must be reconciled (W3b), audited
+    OK (W4), and the audit that blessed it must not have been vacuous
+    (consumes the 74c50e6 guard). Raises with the offending stamp named."""
+    if meta.get("reconciled") != "true":
+        raise HarnessError(f"gate parse_meta.reconciled: "
+                           f"{meta.get('reconciled')!r} != 'true'")
+    if meta.get("audit_ok") != "true":
+        raise HarnessError(f"gate parse_meta.audit_ok: "
+                           f"{meta.get('audit_ok')!r} != 'true'")
+    if not meta.get("audit_version"):
+        raise HarnessError("gate parse_meta.audit_version: missing")
+    raw = meta.get("audit_input_counts")
+    if not raw:
+        raise HarnessError("gate parse_meta.audit_input_counts: missing "
+                           "(cannot prove the audit was non-vacuous)")
+    try:
+        counts = json.loads(raw)
+    except ValueError as e:
+        raise HarnessError(f"gate parse_meta.audit_input_counts: "
+                           f"unparseable ({e})")
+    if not (counts.get("reference_n", 0) > 0 and counts.get("csv_n", 0) > 0):
+        raise HarnessError(f"gate parse_meta.audit_input_counts: vacuous "
+                           f"audit inputs {counts} - audit_ok proves nothing")
 
-    The 3.2.5 self-test gate is wired HERE, not deferred to W6b (Codex W6a
-    review P1): a harness that misgrades synthetic known answers must refuse
-    to grade anything real, even on exploratory runs."""
+
+def diff_paths(cand, inc, _prefix=""):
+    """Dotted paths where two configs differ. Top-level candidacy
+    bookkeeping (IDENTITY_FIELDS) is excluded - it differs by construction.
+    Lists compare atomically (a changed grid IS the knob)."""
+    paths = []
+    for k in sorted(set(cand) | set(inc)):
+        if _prefix == "" and k in IDENTITY_FIELDS:
+            continue
+        path = f"{_prefix}{k}"
+        if k not in cand or k not in inc:
+            paths.append(path)
+        elif isinstance(cand[k], dict) and isinstance(inc[k], dict):
+            paths.extend(diff_paths(cand[k], inc[k], _prefix=path + "."))
+        elif cand[k] != inc[k]:
+            paths.append(path)
+    return paths
+
+
+def gate_config_diff(cand_cfg, inc_cfg):
+    """Gate 3.2.7 (review fix): the candidate must differ from its incumbent
+    in the declared knob paths and NOTHING else. An accidental clone or an
+    undeclared difference is a BLOCKED misconfiguration, never a quiet
+    INCONCLUSIVE."""
+    actual = diff_paths(cand_cfg, inc_cfg)
+    if not actual:
+        raise HarnessError(
+            "gate config-diff: candidate is an incumbent clone (no "
+            "non-identity differences) - nothing is under test")
+    if not cand_cfg.get("knob_id"):
+        raise HarnessError("gate config-diff: candidate declares no knob_id")
+    declared = list(cand_cfg.get("expected_diff_paths") or [])
+    if set(actual) != set(declared):
+        raise HarnessError(
+            f"gate config-diff: actual diff {sorted(actual)} != declared "
+            f"expected_diff_paths {sorted(declared)} (knob "
+            f"{cand_cfg.get('knob_id')!r})")
+
+
+# -- replay stages (shared by walk_forward_replay and run_replay) ---------------------------
+def _load_substrate(db_path):
+    con = sqlite3.connect(db_path)
+    try:
+        rows = consumer_rows(con)
+        substrate = substrate_identity(db_path, con)
+        meta = dict(con.execute("SELECT key, value FROM parse_meta"))
+    finally:
+        con.close()
+    return rows, substrate, meta
+
+
+def _run_self_test_gate(harness_cfg):
     v = harness_cfg["verdict"]
     self_test = run_self_test(harness_cfg["seeds"]["self_test"],
                               mde=v["mde_brier"],
@@ -580,12 +672,10 @@ def walk_forward_replay(db_path, harness_cfg, cand_cfg, inc_cfg, *,
             f"self-test failed (spec 3.2.5): got {self_test['verdicts']}, "
             f"expected {self_test['expected']} - no real event may be "
             f"graded this run")
-    con = sqlite3.connect(db_path)
-    try:
-        rows = consumer_rows(con)
-        substrate = substrate_identity(db_path, con)
-    finally:
-        con.close()
+    return self_test
+
+
+def _enumerate(rows, harness_cfg, split, limit):
     elig = harness_cfg["eligibility"]
     events, universe_report = event_universe(
         rows, tiers=tuple(elig["tiers"]),
@@ -594,18 +684,21 @@ def walk_forward_replay(db_path, harness_cfg, cand_cfg, inc_cfg, *,
     chosen = split_map[split]
     if limit is not None:
         chosen = chosen[:limit]
+    return chosen, split_map, universe_report
+
+
+def _prep_events(rows, chosen, harness_cfg, universe_hops=None):
+    """Window + leakage assertion + fit universe per chosen event. Pure
+    enumeration - no fitting - so the manifest can pin fit-cache keys
+    BEFORE any fit runs."""
     hops = (universe_hops if universe_hops is not None
             else {"1hop": 1, "2hop": 2}[harness_cfg["fit_universe"]["rule"]])
-    min_obs = harness_cfg["fit_universe"]["min_obs"]
     rows_by_tid = {}
     for r in rows:
         rows_by_tid.setdefault(r["tournament_id"], []).append(r)
     rows_sorted = sorted(rows, key=lambda r: (utc_key(r["start_date"]),
                                               r["match_id"]))
-    substrate_sha = canonical_sha(substrate)
-    cand_sha, inc_sha = config_sha(cand_cfg), config_sha(inc_cfg)
-
-    all_rows, summaries = [], []
+    prepped = []
     for ev in chosen:
         ev_rows = rows_by_tid[ev["tournament_id"]]
         boundary = ev["boundary"]
@@ -615,32 +708,75 @@ def walk_forward_replay(db_path, harness_cfg, cand_cfg, inc_cfg, *,
                     if w_start <= utc_key(r["start_date"]) < b_key]
         assert_no_leakage(win_rows, ev_rows, boundary)
         u = build_fit_universe(ev_rows, win_rows, hops=hops)
-        window_spec = (w_start, boundary)
-        fits = {}
+        prepped.append({"event": ev, "ev_rows": ev_rows, "universe": u,
+                        "window_spec": (w_start, boundary)})
+    return prepped
+
+
+def _replay_prepped(prepped, cand_cfg, inc_cfg, harness_cfg, cache_dir,
+                    substrate_sha):
+    cand_sha, inc_sha = config_sha(cand_cfg), config_sha(inc_cfg)
+    min_obs = harness_cfg["fit_universe"]["min_obs"]
+    all_rows, summaries, cache_keys = [], [], {}
+    for p in prepped:
+        ev, u = p["event"], p["universe"]
+        fits, keys = {}, {}
         for tag, cfg, sha in (("cand", cand_cfg, cand_sha),
                               ("inc", inc_cfg, inc_sha)):
             key = fit_cache_key(sha, u["universe"], u["fit_match_ids"],
-                                window_spec, substrate_sha)
+                                p["window_spec"], substrate_sha)
+            keys[tag] = key
             fits[tag] = cached_fit(cache_dir, key,
                                    lambda c=cfg, ui=u: fit_engine(c, ui))
+        cache_keys[str(ev["tournament_id"])] = keys
         graded, skipped = grade_event_walkforward(
-            ev_rows, fits["cand"], fits["inc"], u["window_counts"],
+            p["ev_rows"], fits["cand"], fits["inc"], u["window_counts"],
             min_obs=min_obs)
         summary = event_summary(ev["tournament_id"], graded, skipped,
                                 coverage_floor=harness_cfg["coverage_floor"])
-        summary["boundary"] = boundary
+        summary["boundary"] = ev["boundary"]
         summary["n_fit_matches"] = len(u["fit_match_ids"])
         summary["universe_size"] = len(u["universe"])
+        summary["skipped"] = skipped
         summaries.append(summary)
         if not summary["excluded"]:
             all_rows.extend(graded)
+    return summaries, all_rows, cache_keys
 
+
+def _stats_from_summaries(summaries, harness_cfg):
     included = [s for s in summaries
                 if not s["excluded"] and s["mean_delta_brier"] is not None]
     deltas = [s["mean_delta_brier"] for s in included]
-    stats = (paired_event_stats(deltas,
-                                ci_level=harness_cfg["verdict"]["ci_level"])
-             if len(deltas) >= 2 else None)
+    if len(deltas) < 2:
+        return None, included
+    return paired_event_stats(
+        deltas, ci_level=harness_cfg["verdict"]["ci_level"]), included
+
+
+# -- walk-forward orchestration (spec 4; in-memory/exploratory shape) -----------------------
+def walk_forward_replay(db_path, harness_cfg, cand_cfg, inc_cfg, *,
+                        split="dev", limit=None, cache_dir=CACHE_DIR,
+                        universe_hops=None):
+    """Replay candidate vs incumbent over the eligible events of one split.
+    Returns in-memory results; run dirs, manifests, the full gate stack and
+    verdict persistence are run_replay's layer on top. `limit` exists for
+    the measured perf budget (spec 4.5) and the 1-vs-2-hop spot-check (4.4)
+    - a limited run is exploratory only, never verdict-bearing.
+
+    The 3.2.5 self-test gate is wired HERE too (Codex W6a review P1): a
+    harness that misgrades synthetic known answers must refuse to grade
+    anything real, even on exploratory runs."""
+    self_test = _run_self_test_gate(harness_cfg)
+    rows, substrate, _meta = _load_substrate(db_path)
+    chosen, split_map, universe_report = _enumerate(rows, harness_cfg,
+                                                    split, limit)
+    prepped = _prep_events(rows, chosen, harness_cfg,
+                           universe_hops=universe_hops)
+    summaries, all_rows, _keys = _replay_prepped(
+        prepped, cand_cfg, inc_cfg, harness_cfg, cache_dir,
+        canonical_sha(substrate))
+    stats, _included = _stats_from_summaries(summaries, harness_cfg)
     return {"harness_version": HARNESS_VERSION, "split": split,
             "limited": limit is not None,
             "self_test_ok": True, "self_test_seed": self_test["seed"],
@@ -653,3 +789,282 @@ def walk_forward_replay(db_path, harness_cfg, cand_cfg, inc_cfg, *,
                                 if s["excluded"]],
             "events": summaries, "rows": all_rows, "stats": stats,
             "substrate": substrate}
+
+
+# -- evidence table (spec 3.1/5.2: baselines are evidence, never gates) ----------------------
+BASELINE_RULES = {"constant-0.5": lambda row: 0.5}
+
+
+def evidence_table(graded_rows, baseline_cfgs):
+    """Mean Brier/log for candidate, incumbent, and each declared simple
+    baseline over the SAME graded rows (DoR 5(2)). Baselines appear in the
+    verdict's evidence table; they never gate by themselves."""
+    n = len(graded_rows)
+    if n == 0:
+        return {}
+
+    def mean(vals):
+        return sum(vals) / n
+
+    out = {"candidate": {"brier": mean([r["brier_cand"] for r in graded_rows]),
+                         "log": mean([r["log_cand"] for r in graded_rows])},
+           "incumbent": {"brier": mean([r["brier_inc"] for r in graded_rows]),
+                         "log": mean([r["log_inc"] for r in graded_rows])},
+           "baselines": {}}
+    for cfg in baseline_cfgs:
+        rule = BASELINE_RULES.get(cfg.get("rule"))
+        if rule is None:
+            raise HarnessError(f"unknown baseline rule {cfg.get('rule')!r} "
+                               f"(known: {sorted(BASELINE_RULES)})")
+        briers, logs = [], []
+        for r in graded_rows:
+            p = rule(r)
+            briers.append(_brier(p, r["result"]))
+            logs.append(_logloss(p, r["result"]))
+        out["baselines"][cfg["name"]] = {"brier": mean(briers),
+                                         "log": mean(logs)}
+    return out
+
+
+# -- persisted gated runs (spec 3.2/3.3/3.4/5, W6b) ------------------------------------------
+def _write_json(path, obj):
+    path.write_text(json.dumps(obj, sort_keys=True, indent=2) + "\n")
+
+
+def _write_jsonl(path, rows):
+    with open(path, "w") as f:
+        for r in rows:
+            f.write(json.dumps(r, sort_keys=True) + "\n")
+
+
+def _has_placeholder(obj):
+    """True if any string value anywhere is an unresolved provenance
+    sentinel ('unknown' or 'pending-*') - the calibration adoption rule."""
+    if isinstance(obj, dict):
+        return any(_has_placeholder(v) for v in obj.values())
+    if isinstance(obj, (list, tuple)):
+        return any(_has_placeholder(v) for v in obj)
+    return isinstance(obj, str) and (obj == "unknown"
+                                     or obj.startswith("pending"))
+
+
+def run_replay(db_path, candidate_path, *, incumbent_path=None,
+               harness_path=None, baseline_paths=None, split="dev",
+               limit=None, run_root=None, cache_dir=CACHE_DIR,
+               burn_log=BURN_LOG):
+    """THE gated adoption-gate run (spec 3.2/3.3/3.4/5): all pre-replay
+    gates, a content-addressed manifest + run dir with every config copied
+    verbatim, per-match rows / per-event summaries / failure report, and
+    the two-stage verdict. Any gate failure -> verdict BLOCKED with NO
+    metrics (a better score from suspect data is not evidence, DoR 5(7)).
+    A dirty code tree still runs but the whole run is exploratory-only
+    (adoption_eligible=False), mirroring calibration's is_manifested rule.
+
+    Every holdout invocation that actually graded events appends to the
+    committed burn log (spec 5.3) - a burned holdout is logged as burned
+    regardless of outcome."""
+    candidate_path = Path(candidate_path)
+    incumbent_path = Path(incumbent_path or CONFIGS_DIR / "incumbent_v0.json")
+    harness_path = Path(harness_path or CONFIGS_DIR / "harness_v0.json")
+    baseline_paths = [Path(p) for p in
+                      (baseline_paths if baseline_paths is not None
+                       else [CONFIGS_DIR / "baseline_uniform.json"])]
+    run_root = Path(run_root or RUNS_DIR)
+    harness_cfg = load_config(harness_path)
+    cand_cfg = load_config(candidate_path)
+    inc_cfg = load_config(incumbent_path)
+    baseline_cfgs = [load_config(p) for p in baseline_paths]
+    v_cfg = harness_cfg["verdict"]
+
+    blocked_gates = []
+    self_test_ok, self_test_seed = False, harness_cfg["seeds"]["self_test"]
+    try:
+        self_test = _run_self_test_gate(harness_cfg)
+        self_test_ok, self_test_seed = True, self_test["seed"]
+    except HarnessError as e:
+        blocked_gates.append(str(e))
+    try:
+        gate_config_diff(cand_cfg, inc_cfg)
+    except HarnessError as e:
+        blocked_gates.append(str(e))
+    rows, substrate, meta = _load_substrate(db_path)
+    try:
+        gate_parse_meta(meta)
+    except HarnessError as e:
+        blocked_gates.append(str(e))
+
+    chosen, split_map, universe_report = _enumerate(rows, harness_cfg,
+                                                    split, limit)
+    if len(chosen) < v_cfg["min_events"]:
+        blocked_gates.append(
+            f"gate min_events: insufficient-n: {len(chosen)} events "
+            f"chosen < min_events {v_cfg['min_events']}")
+
+    substrate_sha = canonical_sha(substrate)
+    failures = [{"kind": "straddler_excluded", "tournament_id": tid}
+                for tid in (e["tournament_id"]
+                            for e in split_map["straddlers"])]
+    failures.append({"kind": "universe_report", **universe_report})
+
+    summaries, all_rows, cache_keys, stats = [], [], {}, None
+    verdict_obj = None
+    if not blocked_gates:
+        prepped = _prep_events(rows, chosen, harness_cfg)
+        summaries, all_rows, cache_keys = _replay_prepped(
+            prepped, cand_cfg, inc_cfg, harness_cfg, cache_dir,
+            substrate_sha)
+        for s in summaries:
+            for sk in s["skipped"]:
+                failures.append({"kind": "skipped_row",
+                                 "tournament_id": s["tournament_id"], **sk})
+            if s["excluded"]:
+                failures.append({"kind": "excluded_event_coverage",
+                                 "tournament_id": s["tournament_id"],
+                                 "coverage": s["coverage"]})
+        stats, included = _stats_from_summaries(summaries, harness_cfg)
+        if stats is None or stats["n_events"] < v_cfg["min_events"]:
+            n = 0 if stats is None else stats["n_events"]
+            blocked_gates.append(
+                f"gate min_events: insufficient-n: {n} included events "
+                f"< min_events {v_cfg['min_events']} (post-coverage)")
+        else:
+            verdict_obj = verdict(stats, mde=v_cfg["mde_brier"],
+                                  min_events=v_cfg["min_events"],
+                                  objective_ok=True, split=split)
+
+    code_dirty = _src_dirty()
+    manifest = {
+        "harness_version": HARNESS_VERSION,
+        "grade_version": GRADE_VERSION,
+        "fit_code_version": FIT_CODE_VERSION,
+        "git_sha": _git_sha(), "code_dirty": code_dirty,
+        "substrate": substrate, "substrate_sha": substrate_sha,
+        "harness_config_sha": config_sha(harness_cfg),
+        "candidate_config_sha": config_sha(cand_cfg),
+        "incumbent_config_sha": config_sha(inc_cfg),
+        "baseline_config_shas": {c["name"]: config_sha(c)
+                                 for c in baseline_cfgs},
+        "sweep_family": cand_cfg.get("sweep_family"),
+        "split": split, "holdout_split": harness_cfg["holdout_split"],
+        "holdout_touched": split == "holdout",
+        "event_set": [[e["tournament_id"], e["boundary"]] for e in chosen],
+        "event_set_sha": canonical_sha(
+            [[e["tournament_id"], e["boundary"]] for e in chosen]),
+        "straddlers": [e["tournament_id"] for e in split_map["straddlers"]],
+        "limited": limit is not None,
+        "seeds": harness_cfg["seeds"], "mc": harness_cfg.get("mc", {}),
+        "self_test_ok": self_test_ok, "self_test_seed": self_test_seed,
+        "fit_cache_keys": cache_keys,
+        "blocked_gates": blocked_gates,
+    }
+    manifest["adoption_eligible"] = (code_dirty is False
+                                     and not blocked_gates
+                                     and not _has_placeholder(manifest))
+    run_id = canonical_sha(manifest)[:16]
+
+    if blocked_gates:
+        verdict_out = {"verdict": "BLOCKED",
+                       "reason": "; ".join(blocked_gates),
+                       "blocked_gates": blocked_gates}
+    else:
+        verdict_out = {"verdict": verdict_obj["verdict"],
+                       "reason": verdict_obj["reason"],
+                       "stats": stats, "blocked_gates": [],
+                       "n_events": stats["n_events"],
+                       "n_matches": len(all_rows),
+                       "coverage_mean": (sum(s["coverage"] for s in included)
+                                         / len(included)),
+                       "mde": v_cfg["mde_brier"],
+                       "ci_level": v_cfg["ci_level"],
+                       "evidence": evidence_table(all_rows, baseline_cfgs)}
+    verdict_out.update({"run_id": run_id, "split": split,
+                        "sweep_family": cand_cfg.get("sweep_family"),
+                        "objective_check": "not-wired-w6c",
+                        "adoption_eligible": manifest["adoption_eligible"]})
+
+    run_dir = run_root / run_id
+    (run_dir / "configs").mkdir(parents=True, exist_ok=True)
+    _write_json(run_dir / "manifest.json", manifest)
+    _write_json(run_dir / "verdict.json", verdict_out)
+    events_out = [{k: v for k, v in s.items() if k != "skipped"}
+                  for s in summaries]
+    _write_jsonl(run_dir / "events.jsonl", events_out)
+    _write_jsonl(run_dir / "rows.jsonl", all_rows)
+    _write_jsonl(run_dir / "failures.jsonl", failures)
+    for p in [harness_path, candidate_path, incumbent_path] + baseline_paths:
+        shutil.copyfile(p, run_dir / "configs" / Path(p).name)
+
+    if split == "holdout" and summaries:
+        # outcomes were graded -> the holdout is burned, whatever the result
+        entry = {"date": datetime.now(timezone.utc).date().isoformat(),
+                 "run_id": run_id,
+                 "candidate_config_sha": manifest["candidate_config_sha"],
+                 "incumbent_config_sha": manifest["incumbent_config_sha"],
+                 "sweep_family": cand_cfg.get("sweep_family"),
+                 "event_set_sha": manifest["event_set_sha"],
+                 "n_events": len(chosen),
+                 "result": verdict_out["verdict"]}
+        with open(burn_log, "a") as f:
+            f.write(json.dumps(entry, sort_keys=True) + "\n")
+
+    return {"run_id": run_id, "run_dir": str(run_dir),
+            "verdict": verdict_out, "manifest": manifest}
+
+
+# -- CLI (spec W6b: manual invocation, no cron) -----------------------------------------------
+def main():
+    from bo3gg_parse import DB_PATH
+    ap = argparse.ArgumentParser(
+        description="V1 validation harness - the adoption gate. Manual "
+                    "runs only (prefers-manual-over-automation).")
+    ap.add_argument("--replay", metavar="CANDIDATE_JSON",
+                    help="candidate engine config to replay vs the incumbent")
+    ap.add_argument("--holdout", action="store_true",
+                    help="run the HOLDOUT split (burns it - logged)")
+    ap.add_argument("--incumbent", default=None,
+                    help="incumbent config (default: incumbent_v0.json)")
+    ap.add_argument("--harness-config", default=None,
+                    help="harness config (default: harness_v0.json)")
+    ap.add_argument("--db", default=str(DB_PATH))
+    ap.add_argument("--limit", type=int, default=None,
+                    help="exploratory: first N events only")
+    ap.add_argument("--self-test", action="store_true",
+                    help="run only the synthetic self-test and exit")
+    args = ap.parse_args()
+
+    if args.self_test:
+        cfg = load_config(CONFIGS_DIR / "harness_v0.json")
+        st = run_self_test(cfg["seeds"]["self_test"])
+        print(f"self-test ok={st['ok']} verdicts={st['verdicts']}")
+        raise SystemExit(0 if st["ok"] else 1)
+    if not args.replay:
+        ap.error("--replay CANDIDATE_JSON required (or --self-test)")
+
+    out = run_replay(args.db, args.replay,
+                     incumbent_path=args.incumbent,
+                     harness_path=args.harness_config,
+                     split="holdout" if args.holdout else "dev",
+                     limit=args.limit)
+    v = out["verdict"]
+    print(f"run {out['run_id']}  split={v['split']}  -> {out['run_dir']}")
+    print(f"VERDICT: {v['verdict']}")
+    print(f"  reason: {v['reason']}")
+    if "stats" in v:
+        s = v["stats"]
+        print(f"  n_events={v['n_events']} n_matches={v['n_matches']} "
+              f"coverage={v['coverage_mean']:.3f}")
+        print(f"  paired delta-Brier mean {s['mean']:+.6f}  "
+              f"CI [{s['ci'][0]:+.6f}, {s['ci'][1]:+.6f}]  "
+              f"(MDE {v['mde']}, t={s['t_crit']:.3f})")
+        for name, e in ([("candidate", v["evidence"]["candidate"]),
+                         ("incumbent", v["evidence"]["incumbent"])]
+                        + sorted(v["evidence"]["baselines"].items())):
+            print(f"  {name:12s} brier {e['brier']:.4f}  log {e['log']:.4f}")
+    print(f"  sweep_family={v['sweep_family']}  "
+          f"objective_check={v['objective_check']}  "
+          f"adoption_eligible={v['adoption_eligible']}")
+    raise SystemExit(1 if v["verdict"] == "BLOCKED" else 0)
+
+
+if __name__ == "__main__":
+    main()

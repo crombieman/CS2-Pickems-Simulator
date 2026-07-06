@@ -6,6 +6,7 @@ DBs go through bo3gg_parse.build_db + classify_promotions so consumer_rows is
 exercised against the real substrate schema, never a hand-rolled one.
 """
 
+import json
 import sqlite3
 import tempfile
 import unittest
@@ -22,11 +23,13 @@ from model import STAGE3_TEAMS, fit_bradley_terry
 import harness
 from harness import (FIT_CODE_VERSION, HARNESS_VERSION, HarnessError,
                      assert_no_leakage, build_fit_universe, cached_fit,
-                     canonical_sha, classify_split, config_sha, event_summary,
-                     event_universe, fit_cache_key, fit_engine,
+                     canonical_sha, classify_split, config_sha, diff_paths,
+                     event_summary, event_universe, fit_cache_key, fit_engine,
+                     gate_config_diff, gate_parse_meta,
                      grade_event_walkforward, load_config, months_before,
-                     paired_event_stats, run_self_test, t_quantile, utc_key,
-                     verdict, walk_forward_replay)
+                     paired_event_stats, run_replay, run_self_test,
+                     select_nominee, t_quantile, utc_key, verdict,
+                     walk_forward_replay)
 
 DATA = Path(__file__).resolve().parent.parent / "data"
 CONFIGS = DATA / "harness" / "configs"
@@ -579,9 +582,8 @@ class TestSelfTest(unittest.TestCase):
 
 
 # -- walk-forward replay end-to-end + self-test gate (Codex W6a review P1) -------------
-class TestWalkForwardReplay(DbCase):
-    """Fixture-DB integration: the replay path itself, and the 3.2.5 gate -
-    a failed self-test must block the replay BEFORE it touches real events."""
+class ReplayFixture(DbCase):
+    """Shared fixture substrate for replay-path tests (no tests here)."""
 
     CFG = {"harness_version": HARNESS_VERSION,
            "eligibility": {"tiers": ["s"], "min_consumer_matches": 8},
@@ -618,6 +620,11 @@ class TestWalkForwardReplay(DbCase):
         con.commit()
         return db
 
+
+class TestWalkForwardReplay(ReplayFixture):
+    """Fixture-DB integration: the replay path itself, and the 3.2.5 gate -
+    a failed self-test must block the replay BEFORE it touches real events."""
+
     def test_end_to_end_fixture_replay(self):
         db = self.replay_db()
         inc = load_config(CONFIGS / "incumbent_v0.json")
@@ -646,6 +653,281 @@ class TestWalkForwardReplay(DbCase):
                                         cache_dir=Path(tmp))
 
 
+# -- W6b: config diff + pre-replay gates (spec 3.2) -------------------------------------
+class TestDiffPaths(unittest.TestCase):
+    def test_nested_leaf_paths(self):
+        a = {"model": {"sigma": 50, "lr": 100.0}, "market_policy": "none"}
+        b = {"model": {"sigma": 60, "lr": 100.0}, "market_policy": "none"}
+        self.assertEqual(diff_paths(a, b), ["model.sigma"])
+
+    def test_added_and_removed_keys_are_diffs(self):
+        self.assertEqual(diff_paths({"a": 1}, {"a": 1, "b": 2}), ["b"])
+        self.assertEqual(diff_paths({"a": 1, "b": 2}, {"a": 1}), ["b"])
+
+    def test_lists_compared_atomically(self):
+        a = {"grid": [1, 2, 3]}
+        b = {"grid": [1, 2, 4]}
+        self.assertEqual(diff_paths(a, b), ["grid"])
+
+    def test_identity_fields_excluded(self):
+        a = {"name": "inc", "knob_id": None, "expected_diff_paths": [],
+             "sweep_family": None, "model": {"sigma": 50}}
+        b = {"name": "cand", "knob_id": "k", "expected_diff_paths": ["x"],
+             "sweep_family": "f", "model": {"sigma": 50}}
+        self.assertEqual(diff_paths(a, b), [])
+
+
+class TestGateConfigDiff(unittest.TestCase):
+    def cand(self, **over):
+        cfg = load_config(CONFIGS / "incumbent_v0.json")
+        cfg["name"] = "cand"
+        cfg["knob_id"] = "smoke.sigma60"
+        cfg["expected_diff_paths"] = ["model.sigma"]
+        cfg["model"] = dict(cfg["model"], sigma=60)
+        cfg.update(over)
+        return cfg
+
+    def test_declared_diff_passes(self):
+        inc = load_config(CONFIGS / "incumbent_v0.json")
+        gate_config_diff(self.cand(), inc)      # no raise
+
+    def test_incumbent_clone_blocked(self):
+        # identical except identity fields = accidental clone (spec 3.2.7)
+        inc = load_config(CONFIGS / "incumbent_v0.json")
+        clone = self.cand(model=dict(inc["model"]),
+                          expected_diff_paths=[])
+        with self.assertRaises(HarnessError):
+            gate_config_diff(clone, inc)
+
+    def test_undeclared_diff_blocked(self):
+        inc = load_config(CONFIGS / "incumbent_v0.json")
+        with self.assertRaises(HarnessError):
+            gate_config_diff(self.cand(expected_diff_paths=[]), inc)
+
+    def test_missing_declared_diff_blocked(self):
+        inc = load_config(CONFIGS / "incumbent_v0.json")
+        sneaky = self.cand(expected_diff_paths=["model.sigma",
+                                                "data_prep.weighting"])
+        with self.assertRaises(HarnessError):
+            gate_config_diff(sneaky, inc)
+
+
+class TestGateParseMeta(unittest.TestCase):
+    GOOD = {"reconciled": "true", "audit_ok": "true",
+            "audit_version": "v1.1-test",
+            "audit_input_counts": '{"reference_n": 40, "csv_n": 16}'}
+
+    def test_good_meta_passes(self):
+        gate_parse_meta(dict(self.GOOD))        # no raise
+
+    def test_each_missing_or_bad_stamp_blocks(self):
+        for k, bad in (("reconciled", None), ("reconciled", "false"),
+                       ("audit_ok", None), ("audit_ok", "false"),
+                       ("audit_version", None),
+                       ("audit_input_counts", None),
+                       ("audit_input_counts", '{"reference_n": 0, "csv_n": 16}'),
+                       ("audit_input_counts", '{"reference_n": 40, "csv_n": 0}')):
+            meta = dict(self.GOOD)
+            if bad is None:
+                del meta[k]
+            else:
+                meta[k] = bad
+            with self.assertRaises(HarnessError, msg=(k, bad)):
+                gate_parse_meta(meta)
+
+
+# -- W6b: nominee selection (spec 3.1/5.2 sweep families) --------------------------------
+class TestSelectNominee(unittest.TestCase):
+    def res(self, name, verdict_name, mean, family="f2.halflife"):
+        return {"candidate_name": name, "verdict": verdict_name,
+                "sweep_family": family, "stats": {"mean": mean}}
+
+    def test_best_dev_mean_among_screened(self):
+        results = [self.res("a", "DEV-SCREENED", -0.004),
+                   self.res("b", "DEV-SCREENED", -0.006),
+                   self.res("c", "INCONCLUSIVE", -0.009),
+                   self.res("d", "REJECT", 0.004)]
+        self.assertEqual(select_nominee(results)["candidate_name"], "b")
+
+    def test_none_screened_returns_none(self):
+        results = [self.res("a", "INCONCLUSIVE", -0.001),
+                   self.res("b", "BLOCKED", 0.0)]
+        self.assertIsNone(select_nominee(results))
+
+    def test_mixed_families_fail_loud(self):
+        results = [self.res("a", "DEV-SCREENED", -0.004),
+                   self.res("b", "DEV-SCREENED", -0.006, family="other")]
+        with self.assertRaises(HarnessError):
+            select_nominee(results)
+
+
+# -- W6b: gated persistent runs (spec 3.2/3.3/3.4/5) --------------------------------------
+def bless(con):
+    """Forge the parse_meta stamps a real audit writes - gate tests exercise
+    the GATES (stamp consumers); the audit itself is tested in
+    test_integrity_audit."""
+    for k, v in (("reconciled", "true"), ("audit_ok", "true"),
+                 ("audit_version", "v1.1-test"),
+                 ("audit_input_counts", '{"reference_n": 40, "csv_n": 16}')):
+        con.execute("INSERT OR REPLACE INTO parse_meta VALUES (?,?)", (k, v))
+    con.commit()
+
+
+class TestRunReplay(ReplayFixture):
+    """run_replay = gates + manifest + persisted run dir + verdict on the
+    fixture substrate."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        # verdict-bearing config: the 2-event fixture must clear min_events
+        cfg = dict(self.CFG)
+        cfg["verdict"] = dict(cfg["verdict"], min_events=2)
+        self.hpath = self.root / "harness_test.json"
+        self.hpath.write_text(json.dumps(cfg))
+        cand = load_config(CONFIGS / "incumbent_v0.json")
+        cand.update(name="cand-sigma60", knob_id="smoke.sigma60",
+                    expected_diff_paths=["model.sigma"])
+        cand["model"] = dict(cand["model"], sigma=60)
+        self.cpath = self.root / "cand.json"
+        self.cpath.write_text(json.dumps(cand))
+
+    def run_it(self, db, **kw):
+        kw.setdefault("harness_path", self.hpath)
+        kw.setdefault("run_root", self.root / "runs")
+        kw.setdefault("cache_dir", self.root / "cache")
+        kw.setdefault("burn_log", self.root / "burn.jsonl")
+        return run_replay(db, self.cpath, **kw)
+
+    def blessed_db(self):
+        db = self.replay_db()
+        con = sqlite3.connect(db)
+        self.addCleanup(con.close)
+        bless(con)
+        return db
+
+    def test_happy_path_writes_run_dir_and_verdict(self):
+        with mock.patch("harness._src_dirty", return_value=False), \
+             mock.patch("harness._git_sha", return_value="abc1234"):
+            out = self.run_it(self.blessed_db())
+        run_dir = Path(out["run_dir"])
+        for f in ("manifest.json", "rows.jsonl", "events.jsonl",
+                  "verdict.json", "failures.jsonl"):
+            self.assertTrue((run_dir / f).exists(), f)
+        self.assertTrue((run_dir / "configs" / "cand.json").exists())
+        v = json.loads((run_dir / "verdict.json").read_text())
+        # sigma 60 vs 50 on 2 events, t(0.975,1)=12.7 -> INCONCLUSIVE
+        self.assertEqual(v["verdict"], "INCONCLUSIVE")
+        self.assertEqual(v["objective_check"], "not-wired-w6c")
+        self.assertTrue(v["adoption_eligible"])
+        # baseline evidence present, never gating
+        self.assertAlmostEqual(
+            v["evidence"]["baselines"]["uniform-0.5"]["brier"], 0.25)
+        m = json.loads((run_dir / "manifest.json").read_text())
+        self.assertEqual(m["git_sha"], "abc1234")
+        self.assertIs(m["code_dirty"], False)
+        self.assertEqual(m["event_set"],
+                         [[501, "2026-06-01T10:00:00+00:00"],
+                          [502, "2026-07-01T10:00:00+00:00"]])
+        self.assertIn("fit_cache_keys", m)
+        self.assertEqual(out["run_id"], canonical_sha(m)[:16])
+
+    def test_manifest_determinism_two_runs_identical_bytes(self):
+        db = self.blessed_db()
+        with mock.patch("harness._src_dirty", return_value=False), \
+             mock.patch("harness._git_sha", return_value="abc1234"):
+            a = self.run_it(db)
+            b = self.run_it(db)
+        self.assertEqual(a["run_id"], b["run_id"])
+        for f in ("manifest.json", "verdict.json", "rows.jsonl",
+                  "events.jsonl", "failures.jsonl"):
+            self.assertEqual((Path(a["run_dir"]) / f).read_bytes(),
+                             (Path(b["run_dir"]) / f).read_bytes(), f)
+
+    def test_bad_audit_stamp_blocks(self):
+        db = self.replay_db()
+        con = sqlite3.connect(db)
+        self.addCleanup(con.close)
+        bless(con)
+        con.execute("INSERT OR REPLACE INTO parse_meta VALUES "
+                    "('audit_ok', 'false')")
+        con.commit()
+        out = self.run_it(db)
+        v = json.loads((Path(out["run_dir"]) / "verdict.json").read_text())
+        self.assertEqual(v["verdict"], "BLOCKED")
+        self.assertNotIn("stats", v)
+        self.assertTrue(any("audit_ok" in g for g in v["blocked_gates"]))
+
+    def test_vacuous_audit_inputs_block(self):
+        db = self.replay_db()
+        con = sqlite3.connect(db)
+        self.addCleanup(con.close)
+        bless(con)
+        con.execute("INSERT OR REPLACE INTO parse_meta VALUES "
+                    "('audit_input_counts', '{\"reference_n\": 0, \"csv_n\": 0}')")
+        con.commit()
+        out = self.run_it(db)
+        v = json.loads((Path(out["run_dir"]) / "verdict.json").read_text())
+        self.assertEqual(v["verdict"], "BLOCKED")
+
+    def test_incumbent_clone_candidate_blocks(self):
+        clone = load_config(CONFIGS / "incumbent_v0.json")
+        clone["name"] = "sneaky-clone"
+        cpath = self.root / "clone.json"
+        cpath.write_text(json.dumps(clone))
+        db = self.blessed_db()
+        out = run_replay(db, cpath, harness_path=self.hpath,
+                         run_root=self.root / "runs",
+                         cache_dir=self.root / "cache",
+                         burn_log=self.root / "burn.jsonl")
+        v = json.loads((Path(out["run_dir"]) / "verdict.json").read_text())
+        self.assertEqual(v["verdict"], "BLOCKED")
+
+    def test_below_min_events_blocks(self):
+        strict = json.loads(self.hpath.read_text())
+        strict["verdict"]["min_events"] = 10       # fixture has only 2
+        hpath = self.root / "harness_strict.json"
+        hpath.write_text(json.dumps(strict))
+        out = self.run_it(self.blessed_db(), harness_path=hpath)
+        v = json.loads((Path(out["run_dir"]) / "verdict.json").read_text())
+        self.assertEqual(v["verdict"], "BLOCKED")
+        self.assertIn("insufficient-n", v["reason"])
+
+    def test_dirty_tree_is_exploratory_only(self):
+        with mock.patch("harness._src_dirty", return_value=True), \
+             mock.patch("harness._git_sha", return_value="abc1234"):
+            out = self.run_it(self.blessed_db())
+        v = json.loads((Path(out["run_dir"]) / "verdict.json").read_text())
+        self.assertEqual(v["verdict"], "INCONCLUSIVE")   # still computed
+        self.assertFalse(v["adoption_eligible"])
+
+    def test_holdout_run_appends_burn_log(self):
+        # move the split so both fixture events land in HOLDOUT
+        cfg = json.loads(self.hpath.read_text())
+        cfg["holdout_split"] = "2026-01-01"
+        hpath = self.root / "harness_holdout.json"
+        hpath.write_text(json.dumps(cfg))
+        burn = self.root / "burn.jsonl"
+        with mock.patch("harness._src_dirty", return_value=False), \
+             mock.patch("harness._git_sha", return_value="abc1234"):
+            out = self.run_it(self.blessed_db(), harness_path=hpath,
+                              split="holdout", burn_log=burn)
+        v = json.loads((Path(out["run_dir"]) / "verdict.json").read_text())
+        # sigma-60-vs-50 will not confirm on 2 events; INCONCLUSIVE, and
+        # the holdout is burned REGARDLESS of outcome
+        self.assertIn(v["verdict"], ("INCONCLUSIVE", "ADOPTED", "REJECT"))
+        (entry,) = [json.loads(l) for l in
+                    burn.read_text().splitlines() if l.strip()]
+        self.assertEqual(entry["candidate_config_sha"],
+                         config_sha(json.loads(self.cpath.read_text())))
+        self.assertEqual(entry["result"], v["verdict"])
+        self.assertIn("event_set_sha", entry)
+        self.assertIn("date", entry)
+        m = json.loads((Path(out["run_dir"]) / "manifest.json").read_text())
+        self.assertTrue(m["holdout_touched"])
+
+
 # -- configs (spec 3.1: committed, declared before replay) ----------------------------
 class TestConfigs(unittest.TestCase):
     def test_harness_v0_loads_with_required_fields(self):
@@ -664,6 +946,12 @@ class TestConfigs(unittest.TestCase):
                          {"mde_brier": 0.002, "ci_level": 0.95,
                           "min_events": 10})
         self.assertIn("self_test", cfg["seeds"])
+
+    def test_baseline_uniform_schema(self):
+        cfg = load_config(CONFIGS / "baseline_uniform.json")
+        self.assertEqual(cfg["kind"], "baseline")
+        self.assertEqual(cfg["name"], "uniform-0.5")
+        self.assertEqual(cfg["rule"], "constant-0.5")
 
     def test_incumbent_v0_schema(self):
         # lr=100 + converge_tol=0.01 (NOT Cologne's lr=2000): the ship-gate
